@@ -1,0 +1,42 @@
+# Unity generated
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Ll]ogs/
+UserSettings/
+
+# Builds
+[Bb]uild/
+[Bb]uilds/
+
+# Memory captures
+[Mm]emoryCaptures/
+
+# Asset Store
+[Aa]ssets/AssetStoreTools*
+
+# Visual Studio / Rider / IDE
+.vs/
+.idea/
+.gradle/
+
+*.csproj
+*.sln
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+
+# OS generated
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# Visual Studio solution files
+*.sln
+*.slnx
+*.csproj
