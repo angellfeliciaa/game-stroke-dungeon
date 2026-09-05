@@ -49,26 +49,46 @@ public class PrologManager : MonoBehaviour
     
     [Header("UI Helper")]
     public GameObject uiSqueezePrompt; 
+
+    [Header("Hand Tracking")]
+    public UDPReceiver udpReceiver;
     
     [Header("Pengaturan")]
     public float kecepatanJalan = 2.5f;
     public float kecepatanKetik = 0.04f;
     public string namaSceneLevel1 = "Level1";
 
+    [Header("Pengaturan Squeeze")]
+    public float durasiSqueeze = 2f;
+
     private bool userKlikLanjut = false;
     private Vector3 posisiAwalPedang; 
 
     void Start()
     {
-        dialogContainer.SetActive(false);
-        if (uiSqueezePrompt != null) uiSqueezePrompt.SetActive(false);
-        
-        if (objekPedang != null)
+        // Cari UDPReceiver yang sudah berjalan dari scene sebelumnya
+        if (udpReceiver == null)
         {
-            posisiAwalPedang = objekPedang.transform.position;
-            objekPedang.SetActive(false);
+            udpReceiver = FindFirstObjectByType<UDPReceiver>();
         }
-        
+
+        if (udpReceiver == null)
+        {
+            Debug.LogError("UDPReceiver tidak ditemukan!");
+        }
+        else
+        {
+            Debug.Log("UDPReceiver berhasil ditemukan oleh PrologManager.");
+        }
+
+        dialogContainer.SetActive(false);
+        promptText.SetActive(false);
+
+        if (objekPedang != null)
+            objekPedang.SetActive(false);
+
+        posisiAwalPedang = objekPedang.transform.position;
+
         StartCoroutine(AlurPrologUtama());
     }
 
@@ -141,14 +161,33 @@ public class PrologManager : MonoBehaviour
         SetAnimasiJalan(false, karakterUtama.position);
 
         // --- ADEGAN 7: Squeeze untuk Buka Chest ---
-        if (uiSqueezePrompt != null) uiSqueezePrompt.SetActive(true);
-        bool petiDitekan = false;
-        while (!petiDitekan)
-        {
-            if (Input.GetMouseButtonDown(0)) petiDitekan = true;
-            yield return null;
-        }
-        if (uiSqueezePrompt != null) uiSqueezePrompt.SetActive(false);
+
+        yield return StartCoroutine(TungguPemainSqueeze(null));
+
+        if (animChest != null)
+            animChest.SetTrigger("Open");
+
+        yield return new WaitForSeconds(0.5f);
+
+        yield return StartCoroutine(AnimasiPedangLompat());
+        // if (uiSqueezePrompt != null)
+        //     uiSqueezePrompt.SetActive(true);
+
+        // bool petiDitekan = false;
+
+        // while (!petiDitekan)
+        // {
+        //     if (udpReceiver != null &&
+        //         udpReceiver.IsGripStrongEnough())
+        //     {
+        //         petiDitekan = true;
+        //     }
+
+        //     yield return null;
+        // }
+
+        // if (uiSqueezePrompt != null)
+        //     uiSqueezePrompt.SetActive(false);
 
         // --- ADEGAN 8: Chest Terbuka & Pedang Lompat ---
         if (animChest != null) animChest.SetTrigger("Open"); 
@@ -224,26 +263,61 @@ public class PrologManager : MonoBehaviour
 
     IEnumerator TungguPemainSqueeze(Animator animPintuTarget)
     {
-        if (uiSqueezePrompt != null) uiSqueezePrompt.SetActive(true);
+        if (uiSqueezePrompt != null)
+            uiSqueezePrompt.SetActive(true);
 
-        bool pintuDitekan = false;
-        while (!pintuDitekan)
+        float waktuGrip = 0f;
+        bool sudahMulaiGrip = false;
+
+        while (waktuGrip < durasiSqueeze)
         {
-            if (Input.GetMouseButtonDown(0)) 
+            if (udpReceiver != null && udpReceiver.IsGripStrongEnough())
             {
-                pintuDitekan = true;
+                // Fist sedang aktif
+                waktuGrip += Time.deltaTime;
+
+                if (!sudahMulaiGrip)
+                {
+                    sudahMulaiGrip = true;
+
+                    Debug.Log("[SQUEEZE] Mulai menahan fist...");
+                }
             }
+            else
+            {
+                // Fist dilepas sebelum 2 detik
+                if (sudahMulaiGrip)
+                {
+                    Debug.Log("[SQUEEZE] Fist dilepas. Timer reset.");
+
+                    sudahMulaiGrip = false;
+                }
+
+                waktuGrip = 0f;
+            }
+
             yield return null;
         }
 
-        if (uiSqueezePrompt != null) uiSqueezePrompt.SetActive(false);
-        
-        if (animPintuTarget != null) 
+        // =========================
+        // SQUEEZE BERHASIL
+        // =========================
+
+        Debug.Log(
+            $"[SQUEEZE BERHASIL] " +
+            $"Grip bertahan {durasiSqueeze:F2} detik | " +
+            $"Grip Level: {udpReceiver.CurrentGripLevel:F2}"
+        );
+
+        if (uiSqueezePrompt != null)
+            uiSqueezePrompt.SetActive(false);
+
+        if (animPintuTarget != null)
         {
             animPintuTarget.SetTrigger("Open");
         }
 
-        yield return new WaitForSeconds(1.0f); 
+        yield return new WaitForSeconds(1.0f);
     }
 
     IEnumerator JalankanDialogLorong(System.Action penandaSelesai)
