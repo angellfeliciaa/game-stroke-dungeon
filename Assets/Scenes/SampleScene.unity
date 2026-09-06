@@ -7854,8 +7854,8 @@ MonoBehaviour:
   - Focus on your grip, not the speed of your progress.
   - The Pulse Blade responds only to true determination.
   - Every small effort is a step toward recovery.
-  pythonPath: /usr/bin/python3
-  pythonScriptPath: /Users/rosamond/ThesisProject/stroke-cv/realtime_hand.py
+  pythonPath: /Users/rosamond/ThesisProject/strokehanddetection/.venv/bin/python
+  pythonScriptPath: /Users/rosamond/ThesisProject/strokehanddetection/main.py
 --- !u!1001 &1557743897396910088
 PrefabInstance:
   m_ObjectHideFlags: 0

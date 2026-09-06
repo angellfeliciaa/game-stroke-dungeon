@@ -346,13 +346,28 @@ public class UDPReceiver : MonoBehaviour
 
         if (hasNewData && latestHandData != null)
         {
+            // Simpan prediction terbaru dari Python
+            currentPrediction =
+                latestHandData.prediction;
+
+            // Confidence fist digunakan
+            // sebagai grip level sementara
+            if (latestHandData.prediction == "fist")
+            {
+                currentGripLevel =
+                    latestHandData.confidence;
+            }
+            else
+            {
+                currentGripLevel = 0f;
+            }
+
             Debug.Log(
                 $"Prediction: {currentPrediction} | " +
                 $"Grip: {currentGripLevel:F2} | " +
-                $"Strong: {IsGripStrongEnough()}"
+                $"Landmarks: " +
+                $"{(latestHandData.landmarks != null ? latestHandData.landmarks.Length : 0)}"
             );
-            // Simpan prediction terbaru dari Python
-            currentPrediction = latestHandData.prediction;
 
             // Confidence fist digunakan sebagai grip level
             if (latestHandData.prediction == "fist")

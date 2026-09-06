@@ -4,6 +4,7 @@ using UnityEngine.UI;
 using TMPro;
 using System.Collections;
 using System.Diagnostics;
+using System.IO;
 
 #if UNITY_EDITOR
 using UnityEditor;
@@ -64,9 +65,8 @@ public class SequenceManager : MonoBehaviour
     // JALANKAN PYTHON COMPUTER VISION
     // ==========================================================
 
-    private void StartPythonCV()
+   private void StartPythonCV()
     {
-        // Cek apakah Python sudah berjalan
         if (
             pythonProcess != null &&
             !pythonProcess.HasExited
@@ -90,21 +90,22 @@ public class SequenceManager : MonoBehaviour
             startInfo.Arguments =
                 $"\"{pythonScriptPath}\"";
 
+            startInfo.WorkingDirectory =
+                Path.GetDirectoryName(
+                    pythonScriptPath
+                );
+
             startInfo.UseShellExecute =
                 false;
 
             startInfo.CreateNoWindow =
                 true;
 
-            // Supaya error dari Python bisa
-            // ditangkap oleh Unity
             startInfo.RedirectStandardError =
-                true;
+                false;
 
-            // Supaya output Python bisa
-            // ditangkap oleh Unity
             startInfo.RedirectStandardOutput =
-                true;
+                false;
 
             pythonProcess =
                 new Process();
@@ -117,6 +118,19 @@ public class SequenceManager : MonoBehaviour
             UnityEngine.Debug.Log(
                 "=== PYTHON CV STARTED ==="
             );
+
+            UnityEngine.Debug.Log(
+                $"Python: {pythonPath}"
+            );
+
+            UnityEngine.Debug.Log(
+                $"Script: {pythonScriptPath}"
+            );
+
+            UnityEngine.Debug.Log(
+                $"Working Directory: " +
+                $"{startInfo.WorkingDirectory}"
+            );
         }
         catch (System.Exception e)
         {
@@ -126,7 +140,6 @@ public class SequenceManager : MonoBehaviour
             );
         }
     }
-
     // ==========================================================
     // STOP PYTHON COMPUTER VISION
     // ==========================================================
