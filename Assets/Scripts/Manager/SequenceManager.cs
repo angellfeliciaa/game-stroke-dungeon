@@ -41,8 +41,8 @@ public class SequenceManager : MonoBehaviour
     };
 
     [Header("Python Computer Vision")]
-    public string pythonPath;
-    public string pythonScriptPath;
+    private string pythonPath;
+    private string pythonScriptPath;
 
     private Process pythonProcess;
 
@@ -67,76 +67,102 @@ public class SequenceManager : MonoBehaviour
 
    private void StartPythonCV()
     {
-        if (
-            pythonProcess != null &&
-            !pythonProcess.HasExited
-        )
+        if (pythonProcess != null && !pythonProcess.HasExited)
         {
-            UnityEngine.Debug.Log(
-                "Python CV sudah berjalan."
-            );
-
+            UnityEngine.Debug.Log("Python CV sudah berjalan.");
             return;
         }
 
         try
         {
-            ProcessStartInfo startInfo =
-                new ProcessStartInfo();
+            // Root folder project Unity
+            string projectRoot = Directory.GetParent(Application.dataPath).FullName;
 
-            startInfo.FileName =
-                pythonPath;
+            // Folder AI
+            string aiFolder = Path.Combine(projectRoot, "AI");
 
-            startInfo.Arguments =
-                $"\"{pythonScriptPath}\"";
+            // Python virtual environment
+            string pythonExecutable = Path.Combine(
+                aiFolder,
+                ".venv",
+                "bin",
+                "python"
+            );
 
-            startInfo.WorkingDirectory =
-                Path.GetDirectoryName(
-                    pythonScriptPath
+            // Python script
+            string scriptPath = Path.Combine(
+                aiFolder,
+                "main.py"
+            );
+
+            // Cek apakah Python ada
+            if (!File.Exists(pythonExecutable))
+            {
+                UnityEngine.Debug.LogError(
+                    $"Python tidak ditemukan!\n" +
+                    $"Expected path: {pythonExecutable}\n\n" +
+                    $"Pastikan teammate sudah menjalankan:\n" +
+                    $"cd AI\n" +
+                    $"./setup.sh"
                 );
 
-            startInfo.UseShellExecute =
-                false;
+                return;
+            }
 
-            startInfo.CreateNoWindow =
-                true;
+            // Cek apakah main.py ada
+            if (!File.Exists(scriptPath))
+            {
+                UnityEngine.Debug.LogError(
+                    $"main.py tidak ditemukan!\n" +
+                    $"Expected path: {scriptPath}"
+                );
 
-            startInfo.RedirectStandardError =
-                false;
+                return;
+            }
 
-            startInfo.RedirectStandardOutput =
-                false;
+            pythonPath = pythonExecutable;
+            pythonScriptPath = scriptPath;
 
-            pythonProcess =
-                new Process();
+            ProcessStartInfo startInfo = new ProcessStartInfo();
 
-            pythonProcess.StartInfo =
-                startInfo;
+            startInfo.FileName = pythonPath;
+            startInfo.Arguments = $"\"{pythonScriptPath}\"";
+
+            // Sangat penting:
+            // main.py membutuhkan model_rehab.pkl
+            startInfo.WorkingDirectory = aiFolder;
+
+            startInfo.UseShellExecute = false;
+            startInfo.CreateNoWindow = false;
+
+            // Jangan redirect dulu supaya OpenCV window
+            // dan Python bisa berjalan normal.
+            startInfo.RedirectStandardError = false;
+            startInfo.RedirectStandardOutput = false;
+
+            pythonProcess = new Process();
+            pythonProcess.StartInfo = startInfo;
 
             pythonProcess.Start();
 
-            UnityEngine.Debug.Log(
-                "=== PYTHON CV STARTED ==="
-            );
+            pythonProcess.EnableRaisingEvents = true;
 
-            UnityEngine.Debug.Log(
-                $"Python: {pythonPath}"
-            );
+            pythonProcess.Exited += (sender, e) =>
+            {
+                UnityEngine.Debug.LogError(
+                    $"=== PYTHON PROCESS EXITED === Exit Code: {pythonProcess.ExitCode}"
+                );
+            };
 
-            UnityEngine.Debug.Log(
-                $"Script: {pythonScriptPath}"
-            );
-
-            UnityEngine.Debug.Log(
-                $"Working Directory: " +
-                $"{startInfo.WorkingDirectory}"
-            );
+            UnityEngine.Debug.Log("=== PYTHON CV STARTED ===");
+            UnityEngine.Debug.Log($"Python: {pythonPath}");
+            UnityEngine.Debug.Log($"Script: {pythonScriptPath}");
+            UnityEngine.Debug.Log($"Working Directory: {aiFolder}");
         }
         catch (System.Exception e)
         {
             UnityEngine.Debug.LogError(
-                "Gagal menjalankan Python CV: " +
-                e.Message
+                "Gagal menjalankan Python CV: " + e.Message
             );
         }
     }

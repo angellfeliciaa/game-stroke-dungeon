@@ -40,3 +40,18 @@ Thumbs.db
 *.sln
 *.slnx
 *.csproj
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# AI environment
+AI/.venv/
+
+# Dataset
+custom_dataset/
+
+# macOS
+.DS_Store
