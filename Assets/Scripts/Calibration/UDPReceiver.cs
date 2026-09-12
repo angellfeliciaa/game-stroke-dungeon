@@ -43,7 +43,7 @@ public class UDPReceiver : MonoBehaviour
 
     // Berapa lama pemain harus mempertahankan grip
     // sebelum kalibrasi dianggap berhasil
-    public float calibrationDuration = 3f;
+    public float calibrationDuration = 2f;
 
     // Seberapa jauh nilai grip boleh berubah
     // dari nilai grip saat pertama kali calibration dimulai
@@ -306,7 +306,7 @@ public class UDPReceiver : MonoBehaviour
     void Update()
     {
         // ==========================================================
-        // 1. UPDATE LAYAR WEBCAM
+        // 1. UPDATE LAYAR WEBCAM (nanti dluu)
         // ==========================================================
 
         // Untuk sekarang bagian video sengaja tidak diproses.
