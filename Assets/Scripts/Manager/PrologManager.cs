@@ -84,6 +84,9 @@ public class PrologManager : MonoBehaviour
         dialogContainer.SetActive(false);
         promptText.SetActive(false);
 
+        if (uiSqueezePrompt != null)
+            uiSqueezePrompt.SetActive(false);
+
         if (objekPedang != null)
             objekPedang.SetActive(false);
 
@@ -170,24 +173,6 @@ public class PrologManager : MonoBehaviour
         yield return new WaitForSeconds(0.5f);
 
         yield return StartCoroutine(AnimasiPedangLompat());
-        // if (uiSqueezePrompt != null)
-        //     uiSqueezePrompt.SetActive(true);
-
-        // bool petiDitekan = false;
-
-        // while (!petiDitekan)
-        // {
-        //     if (udpReceiver != null &&
-        //         udpReceiver.IsGripStrongEnough())
-        //     {
-        //         petiDitekan = true;
-        //     }
-
-        //     yield return null;
-        // }
-
-        // if (uiSqueezePrompt != null)
-        //     uiSqueezePrompt.SetActive(false);
 
         // --- ADEGAN 8: Chest Terbuka & Pedang Lompat ---
         if (animChest != null) animChest.SetTrigger("Open"); 
