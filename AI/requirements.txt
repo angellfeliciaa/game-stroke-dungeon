@@ -1,0 +1,8 @@
+opencv-python
+mediapipe==0.10.14
+scikit-learn
+joblib
+datasets==2.20.0
+numpy
+jax==0.4.28
+jaxlib==0.4.28

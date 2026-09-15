@@ -1,29 +1,38 @@
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
-using TMPro; // Wajib ditambahin buat ngontrol teks TextMeshPro
+using TMPro;
 using System.Collections;
+using System.Diagnostics;
+using System.IO;
+
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
 
 public class SequenceManager : MonoBehaviour
 {
     [Header("Komponen UI & Karakter")]
-    public UIPopup scriptPopup; 
-    public Transform karakterUtama; 
-    public Transform titikPintu; 
-    public Animator animKarakter; 
-    
+    public UIPopup scriptPopup;
+    public Transform karakterUtama;
+    public Transform titikPintu;
+    public Animator animKarakter;
+
+    public UDPReceiver udpReceiver;
+
     [Header("Pengaturan Sutradara")]
-    public float waktuSimulasiKalibrasi = 3f; 
+    public float waktuSimulasiKalibrasi = 3f;
     public float kecepatanJalan = 2.5f;
-    public string namaSceneLevel1 = "Level1"; 
+    public string namaSceneLevel1 = "Prologue";
 
     [Header("Pengaturan Loading Screen")]
-    public Image layarHitamFader; 
+    public Image layarHitamFader;
     public float kecepatanFade = 2f;
-    
+
     [Header("Pengaturan Teks Loading Dinamis")]
-    public TextMeshProUGUI teksLoading; 
-    [TextArea(2, 3)] // Biar kolom input di Unity lebih lebar
+    public TextMeshProUGUI teksLoading;
+
+    [TextArea(2, 3)]
     public string[] daftarTipsLoading = {
         "One grip, one pulse of life.",
         "Focus on your grip, not the speed of your progress.",
@@ -31,87 +40,397 @@ public class SequenceManager : MonoBehaviour
         "Every small effort is a step toward recovery."
     };
 
-    // Fungsi ini yang akan dicolok ke tombol "Start Journey"
+    [Header("Python Computer Vision")]
+    private string pythonPath;
+    private string pythonScriptPath;
+
+    private Process pythonProcess;
+
+    // ==========================================================
+    // MULAI PYTHON + SEQUENCE
+    // ==========================================================
+
     public void MulaiAdeganMasukDungeon()
     {
+        UnityEngine.Debug.Log("=== START JOURNEY CLICKED ===");
+
+        // Jalankan Python computer vision
+        StartPythonCV();
+
+        // Mulai sequence game
         StartCoroutine(JalankanSequence());
     }
 
+    // ==========================================================
+    // JALANKAN PYTHON COMPUTER VISION
+    // ==========================================================
+
+   private void StartPythonCV()
+    {
+        if (pythonProcess != null && !pythonProcess.HasExited)
+        {
+            UnityEngine.Debug.Log("Python CV sudah berjalan.");
+            return;
+        }
+
+        try
+        {
+            // Root folder project Unity
+            string projectRoot = Directory.GetParent(Application.dataPath).FullName;
+
+            // Folder AI
+            string aiFolder = Path.Combine(projectRoot, "AI");
+
+            // Python virtual environment
+            string pythonExecutable = Path.Combine(
+                aiFolder,
+                ".venv",
+                "bin",
+                "python"
+            );
+
+            // Python script
+            string scriptPath = Path.Combine(
+                aiFolder,
+                "main.py"
+            );
+
+            // Cek apakah Python ada
+            if (!File.Exists(pythonExecutable))
+            {
+                UnityEngine.Debug.LogError(
+                    $"Python tidak ditemukan!\n" +
+                    $"Expected path: {pythonExecutable}\n\n" +
+                    $"Pastikan teammate sudah menjalankan:\n" +
+                    $"cd AI\n" +
+                    $"./setup.sh"
+                );
+
+                return;
+            }
+
+            // Cek apakah main.py ada
+            if (!File.Exists(scriptPath))
+            {
+                UnityEngine.Debug.LogError(
+                    $"main.py tidak ditemukan!\n" +
+                    $"Expected path: {scriptPath}"
+                );
+
+                return;
+            }
+
+            pythonPath = pythonExecutable;
+            pythonScriptPath = scriptPath;
+
+            ProcessStartInfo startInfo = new ProcessStartInfo();
+
+            startInfo.FileName = pythonPath;
+            startInfo.Arguments = $"\"{pythonScriptPath}\"";
+
+            // Sangat penting:
+            // main.py membutuhkan model_rehab.pkl
+            startInfo.WorkingDirectory = aiFolder;
+
+            startInfo.UseShellExecute = false;
+            startInfo.CreateNoWindow = false;
+
+            // Jangan redirect dulu supaya OpenCV window
+            // dan Python bisa berjalan normal.
+            startInfo.RedirectStandardError = false;
+            startInfo.RedirectStandardOutput = false;
+
+            pythonProcess = new Process();
+            pythonProcess.StartInfo = startInfo;
+
+            pythonProcess.Start();
+
+            pythonProcess.EnableRaisingEvents = true;
+
+            pythonProcess.Exited += (sender, e) =>
+            {
+                UnityEngine.Debug.LogError(
+                    $"=== PYTHON PROCESS EXITED === Exit Code: {pythonProcess.ExitCode}"
+                );
+            };
+
+            UnityEngine.Debug.Log("=== PYTHON CV STARTED ===");
+            UnityEngine.Debug.Log($"Python: {pythonPath}");
+            UnityEngine.Debug.Log($"Script: {pythonScriptPath}");
+            UnityEngine.Debug.Log($"Working Directory: {aiFolder}");
+        }
+        catch (System.Exception e)
+        {
+            UnityEngine.Debug.LogError(
+                "Gagal menjalankan Python CV: " + e.Message
+            );
+        }
+    }
+    // ==========================================================
+    // STOP PYTHON COMPUTER VISION
+    // ==========================================================
+
+    private void StopPythonCV()
+    {
+        if (pythonProcess != null)
+        {
+            try
+            {
+                if (!pythonProcess.HasExited)
+                {
+                    pythonProcess.Kill();
+
+                    pythonProcess.WaitForExit();
+                }
+
+                pythonProcess.Dispose();
+
+                pythonProcess = null;
+
+                UnityEngine.Debug.Log(
+                    "=== PYTHON STOPPED ==="
+                );
+            }
+            catch (System.Exception e)
+            {
+                UnityEngine.Debug.LogWarning(
+                    $"Gagal menghentikan Python: {e.Message}"
+                );
+            }
+        }
+    }
+
+    // ==========================================================
+    // SEQUENCE UTAMA
+    // ==========================================================
+
     private IEnumerator JalankanSequence()
     {
-        // Adegan 1: Munculkan pop-up kalibrasi (pakai efek fade-in)
+        UnityEngine.Debug.Log(
+            "=== SEQUENCE START ==="
+        );
+
+        // Beri sedikit waktu supaya
+        // Python mulai membuka webcam
+        yield return new WaitForSeconds(1f);
+
+        UnityEngine.Debug.Log(
+            "=== SHOW CALIBRATION POPUP ==="
+        );
+
+        // Tampilkan popup calibration
         scriptPopup.Show();
 
-        // Adegan 2: Tunggu beberapa detik (Pura-puranya pasien lagi ngeremas tangan)
-        yield return new WaitForSeconds(waktuSimulasiKalibrasi);
+        // Pastikan UDP Receiver tersedia
+        if (udpReceiver == null)
+        {
+            UnityEngine.Debug.LogError(
+                "UDP Receiver belum dihubungkan!"
+            );
 
-        // Adegan 3: Tutup pop-up kalibrasi
+            yield break;
+        }
+
+        UnityEngine.Debug.Log(
+            "=== WAITING FOR CALIBRATION ==="
+        );
+
+        // Tunggu sampai pemain selesai calibration
+        while (!udpReceiver.IsCalibrationCompleted)
+        {
+            yield return null;
+        }
+
+        UnityEngine.Debug.Log(
+            "=== CALIBRATION COMPLETED ==="
+        );
+
+        // Sembunyikan popup calibration
         scriptPopup.Hide();
 
-        // Adegan 4: Tunggu sebentar biar efek fade-out UI nya selesai (0.5 detik)
         yield return new WaitForSeconds(0.5f);
 
-        // Adegan 5: Karakter mulai jalan!
-        if (animKarakter != null) 
+        // ======================================================
+        // KARAKTER MULAI BERJALAN
+        // ======================================================
+
+        if (animKarakter != null)
         {
-            animKarakter.SetFloat("MoveX", 1f); 
-            animKarakter.SetFloat("MoveY", 0f);
-            animKarakter.SetFloat("Speed", 1f); 
+            animKarakter.SetFloat(
+                "MoveX",
+                1f
+            );
+
+            animKarakter.SetFloat(
+                "MoveY",
+                0f
+            );
+
+            animKarakter.SetFloat(
+                "Speed",
+                1f
+            );
         }
 
-        while (Vector3.Distance(karakterUtama.position, titikPintu.position) > 0.05f)
+        UnityEngine.Debug.Log(
+            "=== CHARACTER START WALKING ==="
+        );
+
+        // Gerakkan karakter menuju pintu
+        while (
+            Vector3.Distance(
+                karakterUtama.position,
+                titikPintu.position
+            ) > 0.05f
+        )
         {
-            karakterUtama.position = Vector3.MoveTowards(karakterUtama.position, titikPintu.position, kecepatanJalan * Time.deltaTime);
-            yield return null; 
+            karakterUtama.position =
+                Vector3.MoveTowards(
+                    karakterUtama.position,
+                    titikPintu.position,
+                    kecepatanJalan *
+                    Time.deltaTime
+                );
+
+            yield return null;
         }
 
-        // Adegan 6: Karakter sampai di pintu, buat dia jadi diam (Idle)
-        if (animKarakter != null) 
+        // Hentikan animasi berjalan
+        if (animKarakter != null)
         {
-            animKarakter.SetFloat("Speed", 0f); 
-        }
-        
-        // --- BAGIAN FADE DENGAN CANVAS GROUP & TEKS DINAMIS ---
-        
-        // Pilih satu teks secara acak dari daftar
-        if (teksLoading != null && daftarTipsLoading.Length > 0)
-        {
-            int indexAcak = Random.Range(0, daftarTipsLoading.Length);
-            teksLoading.text = daftarTipsLoading[indexAcak];
+            animKarakter.SetFloat(
+                "Speed",
+                0f
+            );
         }
 
-        // Kita butuh akses ke Canvas Group si layar hitam
-        CanvasGroup cgFader = layarHitamFader.GetComponent<CanvasGroup>();
-        
-        // Jaga-jaga kalau kamu lupa nambahin komponen Canvas Group di Unity, script ini bakal nambahin otomatis
+        UnityEngine.Debug.Log(
+            "=== CHARACTER REACHED DOOR ==="
+        );
+
+        // ======================================================
+        // LOADING SCREEN
+        // ======================================================
+
+        if (
+            teksLoading != null &&
+            daftarTipsLoading.Length > 0
+        )
+        {
+            int indexAcak =
+                Random.Range(
+                    0,
+                    daftarTipsLoading.Length
+                );
+
+            teksLoading.text =
+                daftarTipsLoading[indexAcak];
+        }
+
+        // Ambil CanvasGroup dari fader
+        CanvasGroup cgFader =
+            layarHitamFader.GetComponent<CanvasGroup>();
+
+        // Kalau belum ada CanvasGroup,
+        // buat otomatis
         if (cgFader == null)
         {
-            cgFader = layarHitamFader.gameObject.AddComponent<CanvasGroup>();
+            cgFader =
+                layarHitamFader.gameObject
+                .AddComponent<CanvasGroup>();
         }
 
-        // 1. Munculkan layar hitam & teks perlahan (Fade In)
+        // ======================================================
+        // FADE OUT
+        // ======================================================
+
         float progress = 0;
+
         while (progress < 1)
         {
-            progress += Time.deltaTime * kecepatanFade;
-            cgFader.alpha = progress; // Mengubah transparansi total (termasuk teks)
+            progress +=
+                Time.deltaTime *
+                kecepatanFade;
+
+            cgFader.alpha =
+                progress;
+
             yield return null;
         }
 
-        // 2. Jeda sebentar biar mata pemain nyaman dan bisa baca tulisan Loading-nya
         yield return new WaitForSeconds(1.5f);
 
-        // 3. Mulai muat level 1 di belakang layar (Async)
-        AsyncOperation operasiLoading = SceneManager.LoadSceneAsync(namaSceneLevel1);
-        operasiLoading.allowSceneActivation = false; // Tahan dulu, jangan langsung pindah
+        // ======================================================
+        // LOAD SCENE BERIKUTNYA
+        // ======================================================
 
-        // Tunggu sampai memori Unity siap (progress mencapai 0.9 atau 90%)
-        while (operasiLoading.progress < 0.9f)
+        UnityEngine.Debug.Log(
+            $"=== LOADING SCENE: {namaSceneLevel1} ==="
+        );
+
+        AsyncOperation operasiLoading =
+            SceneManager.LoadSceneAsync(
+                namaSceneLevel1
+            );
+
+        operasiLoading.allowSceneActivation =
+            false;
+
+        while (
+            operasiLoading.progress < 0.9f
+        )
         {
             yield return null;
         }
 
-        // 4. Eksekusi perpindahan Scene yang super mulus!
-        operasiLoading.allowSceneActivation = true;
+        operasiLoading.allowSceneActivation =
+            true;
+    }
+
+    // ==========================================================
+    // UNITY EDITOR PLAY MODE
+    // ==========================================================
+
+#if UNITY_EDITOR
+
+    private void OnEnable()
+    {
+        EditorApplication.playModeStateChanged +=
+            OnPlayModeStateChanged;
+    }
+
+    private void OnDisable()
+    {
+    #if UNITY_EDITOR
+        EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
+    #endif
+    }
+
+    private void OnPlayModeStateChanged(
+        PlayModeStateChange state
+    )
+    {
+        if (
+            state ==
+            PlayModeStateChange.ExitingPlayMode
+        )
+        {
+            UnityEngine.Debug.Log(
+                "=== PLAY MODE DIHENTIKAN ==="
+            );
+
+            StopPythonCV();
+        }
+    }
+
+#endif
+
+    // ==========================================================
+    // SAAT APPLICATION DITUTUP
+    // ==========================================================
+
+    private void OnApplicationQuit()
+    {
+        StopPythonCV();
     }
 }

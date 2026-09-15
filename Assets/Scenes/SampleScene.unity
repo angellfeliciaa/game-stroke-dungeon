@@ -7807,6 +7807,10 @@ MonoBehaviour:
   textStatus: {fileID: 1280360682}
   dataPort: 5052
   videoPort: 5053
+  calibrationDuration: 3
+  calibrationTolerance: 0.1
+  minimumGripLevel: 0.75
+  fistLostTolerance: 0.75
 --- !u!4 &2094961312
 Transform:
   m_ObjectHideFlags: 0
@@ -7838,6 +7842,7 @@ MonoBehaviour:
   karakterUtama: {fileID: 1233260495}
   titikPintu: {fileID: 725543919}
   animKarakter: {fileID: 1233260496}
+  udpReceiver: {fileID: 2094961311}
   waktuSimulasiKalibrasi: 3
   kecepatanJalan: 2.8
   namaSceneLevel1: Prologue
@@ -7849,6 +7854,8 @@ MonoBehaviour:
   - Focus on your grip, not the speed of your progress.
   - The Pulse Blade responds only to true determination.
   - Every small effort is a step toward recovery.
+  pythonPath: /Users/rosamond/ThesisProject/strokehanddetection/.venv/bin/python
+  pythonScriptPath: /Users/rosamond/ThesisProject/strokehanddetection/main.py
 --- !u!1001 &1557743897396910088
 PrefabInstance:
   m_ObjectHideFlags: 0
