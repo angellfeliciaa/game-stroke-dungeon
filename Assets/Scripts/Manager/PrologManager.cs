@@ -63,6 +63,7 @@ public class PrologManager : MonoBehaviour
 
     private bool userKlikLanjut = false;
     private Vector3 posisiAwalPedang; 
+    private string endMessage;
 
     void Start()
     {
@@ -75,6 +76,9 @@ public class PrologManager : MonoBehaviour
         if (udpReceiver == null)
         {
             Debug.LogError("UDPReceiver tidak ditemukan!");
+            endMessage = "Start from the main menu to connect the camera and calibrate your hand.";
+            cgFader.alpha = 0;
+            return;
         }
         else
         {
@@ -88,9 +92,10 @@ public class PrologManager : MonoBehaviour
             uiSqueezePrompt.SetActive(false);
 
         if (objekPedang != null)
+        {
             objekPedang.SetActive(false);
-
-        posisiAwalPedang = objekPedang.transform.position;
+            posisiAwalPedang = objekPedang.transform.position;
+        }
 
         StartCoroutine(AlurPrologUtama());
     }
@@ -167,13 +172,6 @@ public class PrologManager : MonoBehaviour
 
         yield return StartCoroutine(TungguPemainSqueeze(null));
 
-        if (animChest != null)
-            animChest.SetTrigger("Open");
-
-        yield return new WaitForSeconds(0.5f);
-
-        yield return StartCoroutine(AnimasiPedangLompat());
-
         // --- ADEGAN 8: Chest Terbuka & Pedang Lompat ---
         if (animChest != null) animChest.SetTrigger("Open"); 
         yield return new WaitForSeconds(0.5f); 
@@ -206,6 +204,13 @@ public class PrologManager : MonoBehaviour
         }
         SetAnimasiJalan(false, karakterUtama.position);
 
+        // Level1 is not included yet: finish visibly without loading a missing scene.
+        if (!Application.CanStreamedLevelBeLoaded(namaSceneLevel1))
+        {
+            endMessage = "Prologue complete! The next level is not available yet.";
+            yield break;
+        }
+
         // Transisi Loading Screen
         if (teksLoading != null && daftarTipsLoading.Length > 0)
         {
@@ -226,6 +231,7 @@ public class PrologManager : MonoBehaviour
 
     IEnumerator AnimasiPedangLompat()
     {
+        if (objekPedang == null) yield break;
         objekPedang.SetActive(true);
         objekPedang.transform.position = posisiAwalPedang;
 
@@ -253,10 +259,27 @@ public class PrologManager : MonoBehaviour
 
         float waktuGrip = 0f;
         bool sudahMulaiGrip = false;
+        bool palmSeen = false;
+        int interruption = udpReceiver != null ? udpReceiver.InterruptionVersion : 0;
+        TextMeshProUGUI squeezeText = uiSqueezePrompt != null
+            ? uiSqueezePrompt.GetComponentInChildren<TextMeshProUGUI>(true) : null;
 
         while (waktuGrip < durasiSqueeze)
         {
-            if (udpReceiver != null && udpReceiver.IsGripStrongEnough())
+            // Each interaction starts with an open palm, preventing a held fist
+            // from automatically completing every door and chest in the prologue.
+            if (udpReceiver == null || !udpReceiver.HasFreshData)
+            {
+                palmSeen = false;
+                waktuGrip = 0;
+            }
+            else
+            {
+                if (interruption != udpReceiver.InterruptionVersion) waktuGrip = 0;
+                interruption = udpReceiver.InterruptionVersion;
+                if (udpReceiver.IsPalm) palmSeen = true;
+            }
+            if (palmSeen && udpReceiver != null && udpReceiver.IsGripStrongEnough())
             {
                 // Fist sedang aktif
                 waktuGrip += Time.deltaTime;
@@ -281,6 +304,12 @@ public class PrologManager : MonoBehaviour
                 waktuGrip = 0f;
             }
 
+            if (squeezeText != null)
+            {
+                if (udpReceiver == null || !udpReceiver.HasFreshData) squeezeText.text = "Camera disconnected...";
+                else if (!palmSeen) squeezeText.text = "Open your palm...";
+                else squeezeText.text = $"Hold a fist... {waktuGrip:F1}/{durasiSqueeze:F1}s";
+            }
             yield return null;
         }
 
@@ -303,6 +332,23 @@ public class PrologManager : MonoBehaviour
         }
 
         yield return new WaitForSeconds(1.0f);
+    }
+
+    private void OnGUI()
+    {
+        if (endMessage == null) return;
+        GUILayout.BeginArea(new Rect((Screen.width - 440) / 2f, (Screen.height - 160) / 2f, 440, 160), GUI.skin.box);
+        GUILayout.Label(endMessage, new GUIStyle(GUI.skin.label) { wordWrap = true });
+        if (GUILayout.Button("Return to main menu", GUILayout.Height(40)) && Application.CanStreamedLevelBeLoaded("SampleScene"))
+        {
+            if (udpReceiver != null)
+            {
+                udpReceiver.gameObject.SetActive(false);
+                Destroy(udpReceiver.gameObject);
+            }
+            SceneManager.LoadScene("SampleScene");
+        }
+        GUILayout.EndArea();
     }
 
     IEnumerator JalankanDialogLorong(System.Action penandaSelesai)

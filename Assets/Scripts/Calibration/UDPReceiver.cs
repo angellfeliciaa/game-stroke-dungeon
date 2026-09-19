@@ -1,788 +1,225 @@
-using UnityEngine;
-using UnityEngine.UI;
-using TMPro;
+using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
-using System.Threading;
 using System.Text;
-
-// --- Struktur Data JSON (Harus sama persis dengan yang dikirim Python) ---
-[System.Serializable]
-public class HandData
-{
-    public Landmark[] landmarks;
-    public string prediction;
-    public float confidence;
-}
-
-[System.Serializable]
-public class Landmark
-{
-    public float x;
-    public float y;
-    public float z;
-}
-// --------------------------------------------------------------------------
+using System.Threading;
+using TMPro;
+using UnityEngine;
+using UnityEngine.UI;
 
 public class UDPReceiver : MonoBehaviour
 {
-    [Header("UI Components (Colokan Inspector)")]
+    public static UDPReceiver Instance { get; private set; }
+
+    [Header("UI Components")]
     public RawImage layarWebcam;
     public Image gripBarFill;
     public TextMeshProUGUI textStatus;
-
     [Header("Network Settings")]
     public int dataPort = 5052;
     public int videoPort = 5053;
+    [Min(0.1f)] public float dataTimeout = 0.5f;
+    [Header("Calibration (prediction confidence, not physical force)")]
+    [Min(0.1f)] public float calibrationDuration = 3f;
+    [Range(0, 1)] public float calibrationTolerance = 0.1f;
+    [Range(0, 1)] public float minimumGripLevel = 0.75f;
 
-    // ==========================================================
-    // PENGATURAN KALIBRASI
-    // ==========================================================
-
-    [Header("Calibration")]
-
-    // Berapa lama pemain harus mempertahankan grip
-    // sebelum kalibrasi dianggap berhasil
-    public float calibrationDuration = 2f;
-
-    // Seberapa jauh nilai grip boleh berubah
-    // dari nilai grip saat pertama kali calibration dimulai
-    public float calibrationTolerance = 0.15f;
-
-    // Nilai grip minimum supaya calibration bisa dimulai
-    public float minimumGripLevel = 0.75f;
-
-    // Toleransi kalau fist sempat tidak terdeteksi
-    // karena ada sedikit noise dari computer vision
-    public float fistLostTolerance = 0.75f;
-
-    // Menyimpan progress calibration
-    private float calibrationTimer = 0f;
-
-    // Menyimpan nilai grip saat calibration pertama kali dimulai
-    private float calibrationBaseline = 0f;
-
-    public float CalibrationBaseline
-    {
-        get
-        {
-            return calibrationBaseline;
-        }
-    }
-
-    private float currentGripLevel = 0f;
-
-    public float CurrentGripLevel
-    {
-        get
-        {
-            return currentGripLevel;
-        }
-    }
-
-    private string currentPrediction = "none";
-
-    public string CurrentPrediction
-    {
-        get
-        {
-            return currentPrediction;
-        }
-    }
-
-    public bool IsFist
-    {
-        get
-        {
-            return currentPrediction == "fist";
-        }
-    }
-
-    // Menandakan apakah calibration sudah dimulai
-    private bool calibrationStarted = false;
-
-    // Menandakan apakah calibration sudah selesai
-    private bool calibrationCompleted = false;
-
-    // Menyimpan waktu saat calibration dimulai
-    // supaya timer tidak bergantung pada jumlah data UDP
-    private float calibrationStartTime = 0f;
-
-    // Menghitung berapa lama fist tidak terdeteksi
-    private float fistLostTimer = 0f;
-
-    // ==========================================================
-    // KOMPONEN JARINGAN & THREADING
-    // ==========================================================
-
-    private UdpClient dataClient;
-    private UdpClient videoClient;
-
-    private Thread dataThread;
-    private Thread videoThread;
-
-    // ==========================================================
-    // BUFFER PENYIMPANAN DATA SEMENTARA
-    // ==========================================================
-
-    private byte[] latestVideoBytes;
-    private bool hasNewVideo = false;
-
-    private HandData latestHandData;
-    private bool hasNewData = false;
-
-    // ==========================================================
-    // TEKSTUR UNTUK NAMPILIN VIDEO
-    // ==========================================================
-
+    private readonly HandGestureState state = new HandGestureState();
+    private readonly object bufferLock = new object();
+    private readonly Queue<Packet> pendingData = new Queue<Packet>();
+    private sealed class Packet { public string Json; public double ReceivedAt; }
+    private UdpClient dataClient, videoClient;
+    private Thread dataThread, videoThread;
+    private volatile bool running;
+    private byte[] pendingVideo;
+    private double videoReceivedAt;
+    private string networkError;
     private Texture2D webcamTexture;
+    private string statusOverride;
 
-    void Start()
+    private static double Now { get { return (double)System.Diagnostics.Stopwatch.GetTimestamp() / System.Diagnostics.Stopwatch.Frequency; } }
+    public bool HasFreshData { get { return state.HasFreshData(Now); } }
+    public bool IsPalm { get { return state.IsPalm(Now); } }
+    public bool IsFist { get { return HasFreshData && state.Prediction == "fist"; } }
+    public string CurrentPrediction { get { return HasFreshData ? state.Prediction : "none"; } }
+    public float CurrentGripLevel { get { return IsFist ? state.Confidence : 0; } }
+    public float CalibrationBaseline { get { return state.CalibrationBaseline; } }
+    public bool IsCalibrationCompleted { get { return state.CalibrationCompleted; } }
+    public float CalibrationProgress { get { return Mathf.Clamp01((float)(state.CalibrationProgressSeconds / state.CalibrationDuration)); } }
+    public int InterruptionVersion { get { return state.InterruptionVersion; } }
+    public bool IsListening { get { return running; } }
+    public string ConnectionError { get { lock (bufferLock) return networkError; } }
+    public bool IsGripStrongEnough() { return state.IsGripStrongEnough(Now); }
+
+    private void Awake()
     {
-        // Membuat UDPReceiver tetap hidup
-        // meskipun scene berganti
+        if (Instance != null && Instance != this)
+        {
+            enabled = false;
+            Destroy(gameObject);
+            return;
+        }
+        Instance = this;
         DontDestroyOnLoad(gameObject);
-
-        // Reset semua status calibration
-        // setiap kali game dimulai
-        calibrationTimer = 0f;
-        calibrationBaseline = 0f;
-        calibrationStarted = false;
-        calibrationCompleted = false;
-        calibrationStartTime = 0f;
-        fistLostTimer = 0f;
-
-        // Siapkan kanvas kosong untuk video
-        // ukurannya disamakan dengan video dari Python
-        webcamTexture = new Texture2D(
-            320,
-            240,
-            TextureFormat.RGB24,
-            false
-        );
-
-        // Untuk sekarang preview webcam di Unity
-        // belum kita proses.
-        // Python tetap membuka dan menjalankan webcam.
-        //
-        // Nanti setelah gameplay sudah berjalan,
-        // bagian preview ini bisa kita aktifkan kembali.
-        if (layarWebcam != null)
-        {
-            layarWebcam.texture = webcamTexture;
-        }
-
-        // Tampilkan status awal
-        if (textStatus != null)
-        {
-            textStatus.text =
-                "Status: Menghubungkan ke Kamera...";
-
-            textStatus.color = Color.yellow;
-        }
-
-        // Grip bar dimulai dari kosong
-        if (gripBarFill != null)
-        {
-            gripBarFill.fillAmount = 0f;
-        }
-
-        // Nyalakan antena penangkap data
-        // di background thread
-        StartUDPThreads();
+        state.DataTimeout = Mathf.Max(0.1f, dataTimeout);
+        state.CalibrationDuration = Mathf.Max(0.1f, calibrationDuration);
+        state.MinimumConfidence = minimumGripLevel;
+        state.CalibrationTolerance = calibrationTolerance;
     }
 
-    private void StartUDPThreads()
+    private void OnEnable()
     {
-        // Thread khusus untuk menangkap data
-        // dari Python berupa prediction, confidence,
-        // dan hand landmarks
-        dataThread = new Thread(ReceiveData);
-        dataThread.IsBackground = true;
-        dataThread.Start();
-
-        // Thread khusus untuk menangkap gambar webcam
-        // Untuk sekarang thread ini tetap aktif,
-        // tetapi hasil video belum ditampilkan di Unity.
-        videoThread = new Thread(ReceiveVideo);
-        videoThread.IsBackground = true;
-        videoThread.Start();
+        if (Instance == null) Instance = this;
+        if (Instance != this) return;
+        try
+        {
+            // Bind synchronously so a port conflict is visible before launching Python.
+            dataClient = new UdpClient(new IPEndPoint(IPAddress.Loopback, dataPort));
+            videoClient = new UdpClient(new IPEndPoint(IPAddress.Loopback, videoPort));
+            lock (bufferLock) networkError = null;
+            running = true;
+            dataThread = new Thread(ReceiveData) { IsBackground = true };
+            videoThread = new Thread(ReceiveVideo) { IsBackground = true };
+            dataThread.Start();
+            videoThread.Start();
+        }
+        catch (Exception error)
+        {
+            lock (bufferLock) networkError = "AI connection could not start. Please restart the game.";
+            Debug.LogError("UDP startup failed: " + error.Message);
+            StopNetwork();
+        }
     }
 
     private void ReceiveData()
     {
+        IPEndPoint source = new IPEndPoint(IPAddress.Loopback, 0);
         try
         {
-            dataClient = new UdpClient(dataPort);
-
-            IPEndPoint endPoint =
-                new IPEndPoint(IPAddress.Any, dataPort);
-
-            Debug.Log(
-                $"=== DATA UDP LISTENING ON PORT {dataPort} ==="
-            );
-
-            while (true)
+            while (running)
             {
-                try
+                byte[] bytes = dataClient.Receive(ref source);
+                var packet = new Packet { Json = Encoding.UTF8.GetString(bytes), ReceivedAt = Now };
+                lock (bufferLock)
                 {
-                    // Tunggu data dari Python
-                    byte[] receiveBytes =
-                        dataClient.Receive(ref endPoint);
-
-                    // Ubah byte menjadi teks JSON
-                    string json =
-                        Encoding.UTF8.GetString(receiveBytes);
-
-                    // Terjemahkan JSON menjadi object C#
-                    latestHandData =
-                        JsonUtility.FromJson<HandData>(json);
-
-                    // Tandai bahwa ada data baru
-                    // yang harus diproses oleh Unity
-                    hasNewData = true;
-                }
-                catch (System.Exception e)
-                {
-                    Debug.LogWarning(
-                        "Error terima data: " + e.Message
-                    );
+                    // Preserve gesture transitions within a frame. Overflow invalidates the hold.
+                    if (pendingData.Count >= 120)
+                    {
+                        pendingData.Clear();
+                        pendingData.Enqueue(new Packet { Json = "", ReceivedAt = packet.ReceivedAt });
+                    }
+                    pendingData.Enqueue(packet);
                 }
             }
         }
-        catch (System.Exception e)
+        catch (Exception error)
         {
-            Debug.LogError(
-                "DATA UDP GAGAL START: " +
-                e.Message
-            );
+            if (running) lock (bufferLock) networkError = "AI data connection stopped: " + error.Message;
         }
     }
 
     private void ReceiveVideo()
     {
+        IPEndPoint source = new IPEndPoint(IPAddress.Loopback, 0);
         try
         {
-            videoClient = new UdpClient(videoPort);
-
-            Debug.Log(
-                $"=== VIDEO UDP LISTENING ON PORT {videoPort} ==="
-            );
-
-            IPEndPoint endPoint =
-                new IPEndPoint(IPAddress.Any, videoPort);
-
-            while (true)
+            while (running)
             {
-                try
-                {
-                    // Tunggu data gambar dari Python
-                    byte[] receiveBytes =
-                        videoClient.Receive(ref endPoint);
-
-                    // Simpan gambar terbaru
-                    latestVideoBytes = receiveBytes;
-
-                    // Tandai bahwa ada video baru
-                    hasNewVideo = true;
-                }
-                catch (System.Exception e)
-                {
-                    Debug.LogWarning(
-                        "Error terima video: " + e.Message
-                    );
-                }
+                byte[] bytes = videoClient.Receive(ref source);
+                lock (bufferLock) { pendingVideo = bytes; videoReceivedAt = Now; }
             }
         }
-        catch (System.Exception e)
-        {
-            Debug.LogError(
-                "VIDEO UDP GAGAL START: " +
-                e.Message
-            );
-        }
+        catch (Exception) { /* Preview failure must not break hand input. */ }
     }
 
-    void Update()
+    private void Update()
     {
-        // ==========================================================
-        // 1. UPDATE LAYAR WEBCAM (nanti dluu)
-        // ==========================================================
-
-        // Untuk sekarang bagian video sengaja tidak diproses.
-        //
-        // Python tetap membuka webcam dan tetap mengirim video
-        // melalui UDP 5053, tetapi Unity tidak melakukan
-        // LoadImage() terlebih dahulu.
-        //
-        // Kita lakukan ini supaya masalah preview webcam
-        // tidak mengganggu gameplay dan calibration.
-        //
-        // Nanti setelah game logic sudah berjalan,
-        // bagian ini bisa kita aktifkan kembali.
-
-        /*
-        if (hasNewVideo && latestVideoBytes != null)
+        double now = Now;
+        Packet[] packets;
+        byte[] video;
+        double videoTime;
+        lock (bufferLock)
         {
-            Debug.Log(
-                $"VIDEO RECEIVED: {latestVideoBytes.Length} bytes"
-            );
-
-            bool success = webcamTexture.LoadImage(
-                latestVideoBytes
-            );
-
-            Debug.Log(
-                $"VIDEO LOAD RESULT: {success}"
-            );
-
-            hasNewVideo = false;
+            packets = pendingData.ToArray();
+            pendingData.Clear();
+            video = pendingVideo;
+            pendingVideo = null;
+            videoTime = videoReceivedAt;
         }
-        */
-
-        // ==========================================================
-        // 2. UPDATE STATUS & GRIP BAR
-        // ==========================================================
-
-        if (hasNewData && latestHandData != null)
+        foreach (Packet packet in packets)
         {
-            // Simpan prediction terbaru dari Python
-            currentPrediction =
-                latestHandData.prediction;
-
-            // Confidence fist digunakan
-            // sebagai grip level sementara
-            if (latestHandData.prediction == "fist")
-            {
-                currentGripLevel =
-                    latestHandData.confidence;
-            }
-            else
-            {
-                currentGripLevel = 0f;
-            }
-
-            Debug.Log(
-                $"Prediction: {currentPrediction} | " +
-                $"Grip: {currentGripLevel:F2} | " +
-                $"Landmarks: " +
-                $"{(latestHandData.landmarks != null ? latestHandData.landmarks.Length : 0)}"
-            );
-
-            // Confidence fist digunakan sebagai grip level
-            if (latestHandData.prediction == "fist")
-            {
-                currentGripLevel =
-                    latestHandData.confidence;
-            }
-            else
-            {
-                currentGripLevel = 0f;
-            }
-
-            // Cek apakah ada tangan yang berhasil
-            // dideteksi oleh MediaPipe
-            if (
-                latestHandData.landmarks != null &&
-                latestHandData.landmarks.Length > 0
-            )
-            {
-                // ==================================================
-                // FIST / TANGAN MENGEPAL
-                // ==================================================
-
-                if (latestHandData.prediction == "fist")
-                {
-                    // Confidence dari Python digunakan
-                    // sebagai grip level untuk sementara
-                    float targetFill =
-                        latestHandData.confidence;
-
-                    // Smooth transition supaya grip bar
-                    // tidak bergerak terlalu patah-patah
-                    if (gripBarFill != null)
-                    {
-                        gripBarFill.fillAmount = Mathf.Lerp(
-                            gripBarFill.fillAmount,
-                            targetFill,
-                            Time.deltaTime * 10f
-                        );
-                    }
-
-                    // Karena fist terdeteksi lagi,
-                    // reset timer kehilangan fist
-                    fistLostTimer = 0f;
-
-                    // Lanjutkan proses calibration
-                    ProcessCalibration(targetFill);
-                }
-
-                // ==================================================
-                // BUKAN FIST
-                // ==================================================
-
-                else
-                {
-                    // Kalau tangan bukan fist,
-                    // grip bar turun secara perlahan
-                    if (gripBarFill != null)
-                    {
-                        gripBarFill.fillAmount = Mathf.Lerp(
-                            gripBarFill.fillAmount,
-                            0f,
-                            Time.deltaTime * 5f
-                        );
-                    }
-
-                    // Kalau calibration belum selesai,
-                    // jangan langsung reset.
-                    // Bisa saja prediction salah sebentar
-                    // karena noise dari computer vision.
-                    if (!calibrationCompleted)
-                    {
-                        fistLostTimer += Time.deltaTime;
-
-                        // Kalau fist benar-benar hilang
-                        // terlalu lama, baru calibration di-reset
-                        if (
-                            fistLostTimer >=
-                            fistLostTolerance
-                        )
-                        {
-                            ResetCalibration();
-
-                            if (textStatus != null)
-                            {
-                                textStatus.text =
-                                    "Kepalkan tangan sekuat mungkin!";
-
-                                textStatus.color =
-                                    Color.yellow;
-                            }
-
-                            Debug.Log(
-                                "Calibration reset: fist lost too long."
-                            );
-                        }
-                    }
-                }
-            }
-
-            // ======================================================
-            // TIDAK ADA TANGAN
-            // ======================================================
-
-            else
-            {
-                currentPrediction = "none";
-                currentGripLevel = 0f;
-                if (textStatus != null)
-                {
-                    textStatus.text =
-                        "Posisikan tangan di depan kamera.";
-
-                    textStatus.color =
-                        Color.yellow;
-                }
-
-                // Turunkan grip bar secara perlahan
-                if (gripBarFill != null)
-                {
-                    gripBarFill.fillAmount = Mathf.Lerp(
-                        gripBarFill.fillAmount,
-                        0f,
-                        Time.deltaTime * 5f
-                    );
-                }
-
-                // Jangan langsung reset calibration
-                // hanya karena satu-dua frame kehilangan tangan
-                if (!calibrationCompleted)
-                {
-                    fistLostTimer += Time.deltaTime;
-
-                    if (
-                        fistLostTimer >=
-                        fistLostTolerance
-                    )
-                    {
-                        ResetCalibration();
-
-                        if (textStatus != null)
-                        {
-                            textStatus.text =
-                                "Tangan tidak terdeteksi. Coba lagi.";
-
-                            textStatus.color =
-                                Color.yellow;
-                        }
-
-                        Debug.Log(
-                            "Calibration reset: hand lost too long."
-                        );
-                    }
-                }
-            }
-
-            // Data sudah selesai diproses
-            hasNewData = false;
+            if (now - packet.ReceivedAt > state.DataTimeout) { state.ResetInput(); continue; }
+            try { state.Accept(JsonUtility.FromJson<HandData>(packet.Json), packet.ReceivedAt); }
+            catch (ArgumentException) { state.ResetInput(); }
         }
+        state.Tick(now);
+
+        if (layarWebcam != null)
+        {
+            if (video != null && now - videoTime <= 1 && video.Length >= 4 && video[0] == 0xff && video[1] == 0xd8)
+            {
+                if (webcamTexture == null) webcamTexture = new Texture2D(2, 2, TextureFormat.RGB24, false);
+                if (webcamTexture.LoadImage(video)) layarWebcam.texture = webcamTexture;
+            }
+            if (now - videoTime > 1) layarWebcam.texture = null;
+        }
+        if (gripBarFill != null)
+            gripBarFill.fillAmount = Mathf.Lerp(gripBarFill.fillAmount, CurrentGripLevel, Time.unscaledDeltaTime * 10);
+        if (textStatus == null) return;
+        textStatus.color = Color.yellow;
+        if (statusOverride != null) textStatus.text = statusOverride;
+        else if (!HasFreshData) textStatus.text = "Waiting for the camera connection...";
+        else if (IsCalibrationCompleted)
+        {
+            textStatus.text = "Calibration complete!";
+            textStatus.color = Color.green;
+        }
+        else if (state.CalibrationProgressSeconds > 0)
+            textStatus.text = $"Hold your fist... {state.CalibrationProgressSeconds:F1}s / {calibrationDuration:F1}s";
+        else textStatus.text = "Show your hand and hold a clear fist.";
     }
 
-    // ==========================================================
-    // PROSES KALIBRASI GRIP
-    // ==========================================================
-
-    private void ProcessCalibration(float gripLevel)
+    public void BeginCalibration()
     {
-        // Kalau calibration sudah selesai,
-        // tidak perlu melakukan proses lagi
-        if (calibrationCompleted)
-        {
-            if (textStatus != null)
-            {
-                textStatus.text =
-                    "Kalibrasi berhasil!";
-
-                textStatus.color =
-                    Color.green;
-            }
-
-            return;
-        }
-
-        // ==========================================================
-        // TAHAP 1
-        // MENUNGGU GRIP YANG CUKUP KUAT
-        // ==========================================================
-
-        if (!calibrationStarted)
-        {
-            // Kalau grip masih di bawah minimum,
-            // pemain harus mengepalkan tangan lebih kuat
-            if (gripLevel < minimumGripLevel)
-            {
-                if (textStatus != null)
-                {
-                    textStatus.text =
-                        "Kepalkan tangan lebih kuat!";
-
-                    textStatus.color =
-                        Color.yellow;
-                }
-
-                calibrationTimer = 0f;
-                calibrationBaseline = 0f;
-
-                return;
-            }
-
-            // Grip sudah cukup kuat
-            // → calibration dimulai
-            calibrationStarted = true;
-
-            calibrationTimer = 0f;
-
-            // Simpan grip pertama sebagai baseline
-            calibrationBaseline =
-                gripLevel;
-
-            // Simpan waktu mulai calibration
-            calibrationStartTime =
-                Time.time;
-
-            // Reset timer kehilangan fist
-            fistLostTimer = 0f;
-
-            if (textStatus != null)
-            {
-                textStatus.text =
-                    "Pertahankan kepalan tangan...";
-
-                textStatus.color =
-                    Color.yellow;
-            }
-
-            Debug.Log(
-                $"Calibration Started | " +
-                $"Baseline Grip: {calibrationBaseline:F2}"
-            );
-
-            return;
-        }
-
-        // ==========================================================
-        // TAHAP 2
-        // CEK APAKAH GRIP MASIH STABIL
-        // ==========================================================
-
-        // Hitung selisih antara grip sekarang
-        // dengan grip saat calibration dimulai
-        float difference =
-            Mathf.Abs(
-                gripLevel -
-                calibrationBaseline
-            );
-
-        // Kalau perubahan grip masih dalam batas tolerance,
-        // berarti grip masih dianggap stabil
-        if (difference <= calibrationTolerance)
-        {
-            // Hitung waktu berdasarkan waktu nyata
-            // bukan berdasarkan jumlah data UDP
-            calibrationTimer =
-                Time.time -
-                calibrationStartTime;
-
-            if (textStatus != null)
-            {
-                textStatus.text =
-                    $"Pertahankan kepalan tangan... " +
-                    $"{calibrationTimer:F1}s / " +
-                    $"{calibrationDuration:F1}s";
-
-                textStatus.color =
-                    Color.yellow;
-            }
-
-            // ======================================================
-            // KALIBRASI BERHASIL
-            // ======================================================
-
-            if (
-                calibrationTimer >=
-                calibrationDuration
-            )
-            {
-                calibrationCompleted =
-                    true;
-
-                if (textStatus != null)
-                {
-                    textStatus.text =
-                        "Kalibrasi berhasil!";
-
-                    textStatus.color =
-                        Color.green;
-                }
-
-                Debug.Log(
-                    "=== CALIBRATION SUCCESS ==="
-                );
-            }
-        }
-
-        // ==========================================================
-        // GRIP BERUBAH TERLALU JAUH
-        // ==========================================================
-
-        else
-        {
-            // Kalau grip berubah terlalu jauh,
-            // timer dimulai lagi dari awal
-            calibrationTimer = 0f;
-
-            calibrationStartTime =
-                Time.time;
-
-            if (textStatus != null)
-            {
-                textStatus.text =
-                    "Pertahankan kepalan tangan.";
-
-                textStatus.color =
-                    Color.red;
-            }
-
-            Debug.Log(
-                $"Calibration Timer Reset | " +
-                $"Baseline: {calibrationBaseline:F2} | " +
-                $"Current: {gripLevel:F2} | " +
-                $"Difference: {difference:F2}"
-            );
-        }
+        lock (bufferLock) pendingData.Clear();
+        statusOverride = null;
+        state.BeginCalibration();
     }
 
-    // ==========================================================
-    // RESET CALIBRATION
-    // ==========================================================
-
-    private void ResetCalibration()
+    public void ShowError(string message)
     {
-        // Kembalikan semua status calibration
-        // ke kondisi awal
-        calibrationStarted = false;
-
-        calibrationTimer = 0f;
-
-        calibrationBaseline = 0f;
-
-        calibrationStartTime = 0f;
-
-        fistLostTimer = 0f;
+        state.StopCalibration();
+        state.ResetInput();
+        statusOverride = message;
+        if (textStatus != null) textStatus.text = message;
     }
 
-    // ==========================================================
-    // STATUS CALIBRATION
-    // ==========================================================
-
-    public bool IsGripStrongEnough()
+    private void StopNetwork()
     {
-        if (!calibrationCompleted)
-            return false;
-
-        if (!IsFist)
-            return false;
-
-        return currentGripLevel >=
-            calibrationBaseline - calibrationTolerance;
+        running = false;
+        dataClient?.Close();
+        videoClient?.Close();
+        dataThread?.Join(500);
+        videoThread?.Join(500);
+        dataClient = null;
+        videoClient = null;
+        dataThread = null;
+        videoThread = null;
+        lock (bufferLock) { pendingData.Clear(); pendingVideo = null; }
+        state.ResetInput();
     }
 
-    public bool IsCalibrationCompleted
+    private void OnDisable()
     {
-        get
-        {
-            return calibrationCompleted;
-        }
+        StopNetwork();
+        if (Instance == this) Instance = null;
     }
-
-    public float CalibrationProgress
+    private void OnApplicationQuit() { StopNetwork(); }
+    private void OnDestroy()
     {
-        get
-        {
-            return Mathf.Clamp01(
-                calibrationTimer /
-                calibrationDuration
-            );
-        }
-    }
-
-    // ==========================================================
-    // MATIKAN KONEKSI SAAT GAME DITUTUP
-    // ==========================================================
-
-    void OnApplicationQuit()
-    {
-        // Tutup koneksi UDP supaya thread
-        // tidak tetap berjalan saat game ditutup
-        if (dataClient != null)
-        {
-            dataClient.Close();
-        }
-
-        if (videoClient != null)
-        {
-            videoClient.Close();
-        }
-
-        if (dataThread != null)
-        {
-            dataThread.Abort();
-        }
-
-        if (videoThread != null)
-        {
-            videoThread.Abort();
-        }
+        StopNetwork();
+        if (webcamTexture != null) Destroy(webcamTexture);
+        if (Instance == this) Instance = null;
     }
 }

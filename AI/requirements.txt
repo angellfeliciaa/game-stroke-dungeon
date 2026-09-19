@@ -1,8 +1,9 @@
-opencv-python
+# A single OpenCV distribution provides cv2 (also required by MediaPipe).
+opencv-contrib-python==4.11.0.86
 mediapipe==0.10.14
-scikit-learn
-joblib
-datasets==2.20.0
-numpy
+# Version embedded in model_rehab.pkl.
+scikit-learn==1.6.1
+joblib==1.4.2
+numpy==1.26.4
 jax==0.4.28
 jaxlib==0.4.28

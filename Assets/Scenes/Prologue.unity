@@ -5475,7 +5475,7 @@ MonoBehaviour:
   m_OnCullStateChanged:
     m_PersistentCalls:
       m_Calls: []
-  m_text: Squeeze your hand...
+  m_text: Open your palm...
   m_isRightToLeft: 0
   m_fontAsset: {fileID: 11400000, guid: 426773638922fd745826d29c52d6de58, type: 2}
   m_sharedMaterial: {fileID: 8936805422328587545, guid: 426773638922fd745826d29c52d6de58, type: 2}
@@ -6155,7 +6155,7 @@ MonoBehaviour:
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 5d0cfe4c9ad193e499846ef37cc4cb4c, type: 3}
   m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::StoryManager
+  m_EditorClassIdentifier: Assembly-CSharp::PrologManager
   dialogContainer: {fileID: 1097335215}
   nameText: {fileID: 879744388}
   dialogText: {fileID: 645202927}
