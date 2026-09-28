@@ -1,222 +1,188 @@
-"""
-main.py — Real-time inference & gamification UI for stroke rehabilitation.
-Detects PALM → FIST → PALM cycles and counts repetitions via webcam.
-"""
+"""Webcam hand classification and UDP input for Unity. No camera opens on import."""
 
-import socket
+import argparse
 import json
+import socket
+import sys
+import time
+from pathlib import Path
+
 import cv2
-import numpy as np
-import mediapipe as mp
-from typing import Optional
-mp_hands_module = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
 import joblib
+import mediapipe as mp
+import numpy as np
 
-# ─── Load Model & MediaPipe ───────────────────────────────────────────────────
-print("[Init] Loading model...")
-model = joblib.load("model_rehab.pkl")
-
-# ─── UDP → Unity ─────────────────────────────────────────────────────────────
-
-UDP_IP = "127.0.0.1"
-UDP_PORT = 5052
-
-udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-print(f"[UDP] Sending AI data to {UDP_IP}:{UDP_PORT}")
+MODEL_PATH = Path(__file__).resolve().with_name("model_rehab.pkl")
+MAX_DATAGRAM = 60000
 
 
-hands = mp_hands_module.Hands(
-    static_image_mode=False,
-    max_num_hands=1,
-    min_detection_confidence=0.7,
-    min_tracking_confidence=0.5,
-)
+def load_model(path=MODEL_PATH):
+    model = joblib.load(path)
+    if set(model.classes_) != {"fist", "palm"} or model.n_features_in_ != 63:
+        raise ValueError("Expected a model with fist/palm labels and 63 landmark features.")
+    return model
 
-# ─── Feature Extraction (MUST match train.py) ─────────────────────────────────
 
-def extract_landmarks(image_rgb: np.ndarray, result) -> Optional[np.ndarray]:
-    """
-    Extract normalized landmarks from a MediaPipe result.
-    Normalization: subtract wrist (landmark 0) x/y/z from all 21 landmarks.
-    Returns 63-dim float32 array, or None if no hand detected.
-    """
+def extract_landmarks(result):
+    """Keep the model's original wrist-relative 21 x 3 feature ordering."""
     if not result.multi_hand_landmarks:
         return None
-
-    lm = result.multi_hand_landmarks[0].landmark
-    wx, wy, wz = lm[0].x, lm[0].y, lm[0].z
-
-    features = []
-    for point in lm:
-        features.extend([point.x - wx, point.y - wy, point.z - wz])
-
-    return np.array(features, dtype=np.float32).reshape(1, -1)
+    points = result.multi_hand_landmarks[0].landmark
+    wrist = points[0]
+    return np.array([
+        value for p in points for value in (p.x - wrist.x, p.y - wrist.y, p.z - wrist.z)
+    ], dtype=np.float32).reshape(1, 63)
 
 
-# ─── UI Helpers ───────────────────────────────────────────────────────────────
-
-def overlay_rect(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int,
-                 color: tuple, alpha: float = 0.5) -> np.ndarray:
-    """Draw a semi-transparent filled rectangle on the frame."""
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
-    return cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
-
-
-def draw_balloon(frame: np.ndarray, cx: int, cy: int, radius: int, color: tuple):
-    """Draw a simple balloon (circle + string)."""
-    if radius < 5:
-        return
-    cv2.circle(frame, (cx, cy), radius, color, -1)
-    cv2.circle(frame, (cx, cy), radius, (255, 255, 255), 2)
-    # String
-    cv2.line(frame, (cx, cy + radius), (cx, cy + radius + 40), (180, 180, 180), 2)
-
-
-def send_to_unity(prediction, confidence, result):
-    landmarks = []
-
-    if result.multi_hand_landmarks:
-        for point in result.multi_hand_landmarks[0].landmark:
-            landmarks.append({
-                "x": float(point.x),
-                "y": float(point.y),
-                "z": float(point.z)
-            })
-
-    data = {
-        "prediction": prediction if prediction is not None else "none",
+def make_packet(prediction, confidence, result):
+    points = result.multi_hand_landmarks[0].landmark if result.multi_hand_landmarks else []
+    if not points:
+        return {"prediction": "none", "confidence": 0.0, "landmarks": []}
+    return {
+        "prediction": str(prediction),
         "confidence": float(confidence),
-        "landmarks": landmarks
+        "landmarks": [{"x": float(p.x), "y": float(p.y), "z": float(p.z)} for p in points],
     }
 
-    message = json.dumps(data)
 
-    udp_socket.sendto(
-        message.encode("utf-8"),
-        (UDP_IP, UDP_PORT)
-    )
+def encode_preview(frame):
+    """One complete JPEG per datagram, below the UDP size limit."""
+    preview = cv2.resize(frame, (320, 240))
+    for quality in (65, 40, 20):
+        ok, encoded = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        if ok and encoded.nbytes <= MAX_DATAGRAM:
+            return encoded.tobytes()
+    return None
 
-# ─── Main Loop ────────────────────────────────────────────────────────────────
+
+class UnitySender:
+    def __init__(self, data_port=5052, video_port=5053):
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.data_target = ("127.0.0.1", data_port)
+        self.video_target = ("127.0.0.1", video_port)
+
+    def send(self, packet):
+        self.socket.sendto(json.dumps(packet, allow_nan=False).encode("utf-8"), self.data_target)
+
+    def preview(self, frame):
+        encoded = encode_preview(frame)
+        if encoded is not None:
+            self.socket.sendto(encoded, self.video_target)
+
+    def close(self):
+        try:
+            self.send({"prediction": "none", "confidence": 0.0, "landmarks": []})
+        except OSError:
+            pass
+        finally:
+            self.socket.close()
+
+
+def self_test(model):
+    # Smoke check only: synthetic features do not establish recognition accuracy.
+    features = np.zeros((1, 63), dtype=np.float32)
+    probabilities = model.predict_proba(features)[0]
+    assert np.isfinite(probabilities).all() and np.isclose(probabilities.sum(), 1)
+    with mp.solutions.hands.Hands(static_image_mode=True, max_num_hands=1) as hands:
+        result = hands.process(np.zeros((240, 320, 3), dtype=np.uint8))
+        assert extract_landmarks(result) is None
+    assert encode_preview(np.zeros((240, 320, 3), dtype=np.uint8)) is not None
+    print(f"SELF_TEST_OK model={type(model).__name__} classes={list(model.classes_)} features={model.n_features_in_}")
+
+
+def run(args, model):
+    sender = UnitySender(args.data_port, args.video_port)
+    capture = None
+    counter = 0
+    stage = "waiting_palm"
+    last_preview = 0.0
+    try:
+        capture = cv2.VideoCapture(args.camera)
+        if not capture.isOpened():
+            raise RuntimeError(f"Cannot open camera {args.camera}. Check camera permission or other camera apps.")
+        with mp.solutions.hands.Hands(
+            max_num_hands=1, min_detection_confidence=0.7, min_tracking_confidence=0.5
+        ) as hands:
+            print(f"CAMERA_READY data={args.data_port} video={args.video_port}", flush=True)
+            frame_count = 0
+            while True:
+                ok, frame = capture.read()
+                if not ok:
+                    raise RuntimeError("Camera stopped producing frames.")
+                frame = cv2.flip(frame, 1)
+                result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                features = extract_landmarks(result)
+                prediction, confidence = "none", 0.0
+                if features is not None:
+                    probabilities = model.predict_proba(features)[0]
+                    index = int(np.argmax(probabilities))
+                    prediction, confidence = str(model.classes_[index]), float(probabilities[index])
+                sender.send(make_packet(prediction, confidence, result))
+
+                # A repetition requires PALM -> FIST -> PALM with confident frames.
+                if confidence < 0.75 or prediction == "none":
+                    stage = "waiting_palm"
+                elif prediction == "palm":
+                    if stage == "fist":
+                        counter += 1
+                    stage = "palm"
+                elif prediction == "fist" and stage == "palm":
+                    stage = "fist"
+
+                if result.multi_hand_landmarks:
+                    mp.solutions.drawing_utils.draw_landmarks(
+                        frame, result.multi_hand_landmarks[0], mp.solutions.hands.HAND_CONNECTIONS
+                    )
+                cv2.putText(frame, f"{prediction.upper()}  {confidence:.0%}  REPS: {counter}",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 128), 2)
+                now = time.monotonic()
+                if now - last_preview >= 1 / 15:
+                    try:
+                        sender.preview(frame)
+                    except OSError:
+                        pass  # Preview is optional; hand data remains independent.
+                    last_preview = now
+                if not args.no_window:
+                    cv2.imshow("Stroke Rehab - Q: quit, R: reset", frame)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord("q"):
+                        break
+                    if key == ord("r"):
+                        counter, stage = 0, "waiting_palm"
+                frame_count += 1
+                if args.max_frames and frame_count >= args.max_frames:
+                    break
+    finally:
+        if capture is not None:
+            capture.release()
+        sender.close()
+        cv2.destroyAllWindows()
+
 
 def main():
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("[Error] Cannot open webcam.")
-        return
-
-    # State machine variables
-    counter = 0
-    stage = None          # "down" when fist detected, "up" after palm completes rep
-    
-
-    print("[Main] Webcam started. Press 'q' to quit, 'r' to reset counter.")
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        # Mirror (flip horizontal) for natural feel
-        frame = cv2.flip(frame, 1)
-        h, w = frame.shape[:2]
-
-        # Process with MediaPipe
-        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        image_rgb.flags.writeable = False
-        result = hands.process(image_rgb)
-        image_rgb.flags.writeable = True
-
-        prediction = None
-        confidence = 0.0
-
-        features = extract_landmarks(image_rgb, result)
-        if features is not None:
-            prediction = model.predict(features)[0]
-            proba = model.predict_proba(features)[0]
-            confidence = max(proba)
-
-            # ── State Machine ──────────────────────────────────────────────
-            if prediction == "fist":
-                stage = "down"
-
-            elif prediction == "palm" and stage == "down":
-                stage = "up"
-                counter += 1
-                print(f"[Rep] Counter: {counter}")
-
-         # Kirim hasil AI ke Unity
-        send_to_unity(prediction, confidence, result)
-
-        # ── Draw Hand Landmarks ────────────────────────────────────────────
-        if result.multi_hand_landmarks:
-            for hand_landmarks in result.multi_hand_landmarks:
-                mp_drawing.draw_landmarks(
-                    frame,
-                    hand_landmarks,
-                    mp_hands_module.HAND_CONNECTIONS,
-                    mp_drawing_styles.get_default_hand_landmarks_style(),
-                    mp_drawing_styles.get_default_hand_connections_style(),
-                )
-
-        
-
-        # ── Stats Panel (kiri atas, semi-transparan) ───────────────────────
-        panel_w, panel_h = 260, 130
-        frame = overlay_rect(frame, 0, 0, panel_w, panel_h, (0, 0, 0), alpha=0.55)
-
-        # REPS counter — large & bold
-        cv2.putText(frame, "REPS:", (15, 45),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(frame, str(counter), (130, 45),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 128), 3, cv2.LINE_AA)
-
-        # STATUS
-        cv2.putText(frame, "STATUS:", (15, 85),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
-
-        if prediction == "fist":
-            status_text = "FIST"
-            status_color = (0, 60, 255)   # Red
-        elif prediction == "palm":
-            status_text = "PALM"
-            status_color = (0, 220, 0)    # Green
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--camera", type=int, default=0)
+    parser.add_argument("--data-port", type=int, default=5052)
+    parser.add_argument("--video-port", type=int, default=5053)
+    parser.add_argument("--no-window", action="store_true", help="Preview appears inside Unity only")
+    parser.add_argument("--self-test", action="store_true", help="Test model and dependencies without opening a camera")
+    parser.add_argument("--max-frames", type=int, default=0, help="Stop after this many frames; 0 runs until closed")
+    args = parser.parse_args()
+    if not (1 <= args.data_port <= 65535 and 1 <= args.video_port <= 65535) or args.data_port == args.video_port:
+        parser.error("Use two distinct ports between 1 and 65535.")
+    try:
+        model = load_model()
+        if args.self_test:
+            self_test(model)
         else:
-            status_text = "---"
-            status_color = (150, 150, 150)
-
-        cv2.putText(frame, status_text, (150, 85),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, status_color, 2, cv2.LINE_AA)
-
-        # Confidence
-        conf_str = f"CONF: {confidence:.0%}" if prediction else "CONF: ---"
-        cv2.putText(frame, conf_str, (15, 118),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1, cv2.LINE_AA)
-
-        # Hint text
-        cv2.putText(frame, "Q: quit  R: reset", (10, h - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1, cv2.LINE_AA)
-
-        cv2.imshow("Stroke Rehab — Hand Exercise Counter", frame)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
-            break
-        elif key == ord("r"):
-            counter = 0
-            stage = None
-            radius_balon = 20
-            print("[Reset] Counter reset.")
-
-    cap.release()
-    cv2.destroyAllWindows()
-    hands.close()
-    udp_socket.close()
-    print(f"[Done] Session ended. Total reps: {counter}")
+            run(args, model)
+        return 0
+    except KeyboardInterrupt:
+        return 0
+    except Exception as error:
+        print(f"[AI ERROR] {error}", file=sys.stderr, flush=True)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

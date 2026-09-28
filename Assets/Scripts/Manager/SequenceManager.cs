@@ -6,10 +6,6 @@ using System.Collections;
 using System.Diagnostics;
 using System.IO;
 
-#if UNITY_EDITOR
-using UnityEditor;
-#endif
-
 public class SequenceManager : MonoBehaviour
 {
     [Header("Komponen UI & Karakter")]
@@ -17,420 +13,220 @@ public class SequenceManager : MonoBehaviour
     public Transform karakterUtama;
     public Transform titikPintu;
     public Animator animKarakter;
-
     public UDPReceiver udpReceiver;
-
     [Header("Pengaturan Sutradara")]
-    public float waktuSimulasiKalibrasi = 3f;
     public float kecepatanJalan = 2.5f;
     public string namaSceneLevel1 = "Prologue";
-
     [Header("Pengaturan Loading Screen")]
     public Image layarHitamFader;
     public float kecepatanFade = 2f;
-
-    [Header("Pengaturan Teks Loading Dinamis")]
     public TextMeshProUGUI teksLoading;
-
-    [TextArea(2, 3)]
-    public string[] daftarTipsLoading = {
-        "One grip, one pulse of life.",
-        "Focus on your grip, not the speed of your progress.",
-        "The Pulse Blade responds only to true determination.",
-        "Every small effort is a step toward recovery."
-    };
-
-    [Header("Python Computer Vision")]
-    private string pythonPath;
-    private string pythonScriptPath;
+    [TextArea(2, 3)] public string[] daftarTipsLoading;
+    [Header("AI startup")]
+    [Min(1)] public float connectionTimeout = 30f;
+    [Min(1)] public float calibrationTimeout = 120f;
+    public int cameraIndex = 0;
 
     private Process pythonProcess;
-
-    // ==========================================================
-    // MULAI PYTHON + SEQUENCE
-    // ==========================================================
+    private readonly object logLock = new object();
+    private string lastPythonError;
+    private string playerError;
+    private bool sequenceRunning;
+    private bool journeyStarted;
+    private bool recovering;
+    private double recoveryStarted;
+    private bool ownsProcess;
 
     public void MulaiAdeganMasukDungeon()
     {
-        UnityEngine.Debug.Log("=== START JOURNEY CLICKED ===");
-
-        // Jalankan Python computer vision
-        StartPythonCV();
-
-        // Mulai sequence game
+        if (sequenceRunning || journeyStarted) return;
+        if (udpReceiver != null && UDPReceiver.Instance != udpReceiver) return;
+        playerError = null;
+        if (udpReceiver == null || !udpReceiver.IsListening || udpReceiver.ConnectionError != null)
+        {
+            Fail("The camera connection could not start. Please restart the game.");
+            return;
+        }
+        if (!Application.CanStreamedLevelBeLoaded(namaSceneLevel1))
+        {
+            Fail("The next scene is unavailable.");
+            return;
+        }
+        if (!StartPythonCV()) return;
+        udpReceiver.BeginCalibration();
+        sequenceRunning = true;
         StartCoroutine(JalankanSequence());
     }
 
-    // ==========================================================
-    // JALANKAN PYTHON COMPUTER VISION
-    // ==========================================================
-
-   private void StartPythonCV()
+    private bool StartPythonCV()
     {
-        if (pythonProcess != null && !pythonProcess.HasExited)
+        StopPythonCV();
+        lock (logLock) lastPythonError = null;
+        string root = Directory.GetParent(Application.dataPath).FullName;
+        string aiFolder = Path.Combine(root, "AI");
+        bool windows = Application.platform == RuntimePlatform.WindowsEditor || Application.platform == RuntimePlatform.WindowsPlayer;
+        string executable = Path.Combine(aiFolder, ".venv", windows ? "Scripts" : "bin", windows ? "python.exe" : "python");
+        string script = Path.Combine(aiFolder, "main.py");
+        if (!File.Exists(executable) || !File.Exists(script) || !File.Exists(Path.Combine(aiFolder, "model_rehab.pkl")))
         {
-            UnityEngine.Debug.Log("Python CV sudah berjalan.");
-            return;
+            UnityEngine.Debug.LogError($"AI files missing. Run AI/setup.ps1 on Windows or bash AI/setup.sh on macOS/Linux. Expected Python: {executable}");
+            Fail("Camera input is not ready. Complete the AI setup, then try again.");
+            return false;
         }
-
         try
         {
-            // Root folder project Unity
-            string projectRoot = Directory.GetParent(Application.dataPath).FullName;
-
-            // Folder AI
-            string aiFolder = Path.Combine(projectRoot, "AI");
-
-            // Python virtual environment
-            string pythonExecutable = Path.Combine(
-                aiFolder,
-                ".venv",
-                "bin",
-                "python"
-            );
-
-            // Python script
-            string scriptPath = Path.Combine(
-                aiFolder,
-                "main.py"
-            );
-
-            // Cek apakah Python ada
-            if (!File.Exists(pythonExecutable))
+            var process = new Process();
+            process.StartInfo = new ProcessStartInfo
             {
-                UnityEngine.Debug.LogError(
-                    $"Python tidak ditemukan!\n" +
-                    $"Expected path: {pythonExecutable}\n\n" +
-                    $"Pastikan teammate sudah menjalankan:\n" +
-                    $"cd AI\n" +
-                    $"./setup.sh"
-                );
-
-                return;
-            }
-
-            // Cek apakah main.py ada
-            if (!File.Exists(scriptPath))
-            {
-                UnityEngine.Debug.LogError(
-                    $"main.py tidak ditemukan!\n" +
-                    $"Expected path: {scriptPath}"
-                );
-
-                return;
-            }
-
-            pythonPath = pythonExecutable;
-            pythonScriptPath = scriptPath;
-
-            ProcessStartInfo startInfo = new ProcessStartInfo();
-
-            startInfo.FileName = pythonPath;
-            startInfo.Arguments = $"\"{pythonScriptPath}\"";
-
-            // Sangat penting:
-            // main.py membutuhkan model_rehab.pkl
-            startInfo.WorkingDirectory = aiFolder;
-
-            startInfo.UseShellExecute = false;
-            startInfo.CreateNoWindow = false;
-
-            // Jangan redirect dulu supaya OpenCV window
-            // dan Python bisa berjalan normal.
-            startInfo.RedirectStandardError = false;
-            startInfo.RedirectStandardOutput = false;
-
-            pythonProcess = new Process();
-            pythonProcess.StartInfo = startInfo;
-
-            pythonProcess.Start();
-
-            pythonProcess.EnableRaisingEvents = true;
-
-            pythonProcess.Exited += (sender, e) =>
-            {
-                UnityEngine.Debug.LogError(
-                    $"=== PYTHON PROCESS EXITED === Exit Code: {pythonProcess.ExitCode}"
-                );
+                FileName = executable,
+                Arguments = $"-u \"{script}\" --no-window --camera {cameraIndex} --data-port {udpReceiver.dataPort} --video-port {udpReceiver.videoPort}",
+                WorkingDirectory = aiFolder,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true
             };
-
-            UnityEngine.Debug.Log("=== PYTHON CV STARTED ===");
-            UnityEngine.Debug.Log($"Python: {pythonPath}");
-            UnityEngine.Debug.Log($"Script: {pythonScriptPath}");
-            UnityEngine.Debug.Log($"Working Directory: {aiFolder}");
-        }
-        catch (System.Exception e)
-        {
-            UnityEngine.Debug.LogError(
-                "Gagal menjalankan Python CV: " + e.Message
-            );
-        }
-    }
-    // ==========================================================
-    // STOP PYTHON COMPUTER VISION
-    // ==========================================================
-
-    private void StopPythonCV()
-    {
-        if (pythonProcess != null)
-        {
-            try
+            process.ErrorDataReceived += (sender, args) =>
             {
-                if (!pythonProcess.HasExited)
-                {
-                    pythonProcess.Kill();
-
-                    pythonProcess.WaitForExit();
-                }
-
-                pythonProcess.Dispose();
-
-                pythonProcess = null;
-
-                UnityEngine.Debug.Log(
-                    "=== PYTHON STOPPED ==="
-                );
-            }
-            catch (System.Exception e)
-            {
-                UnityEngine.Debug.LogWarning(
-                    $"Gagal menghentikan Python: {e.Message}"
-                );
-            }
+                if (!string.IsNullOrWhiteSpace(args.Data)) lock (logLock) lastPythonError = args.Data;
+            };
+            process.OutputDataReceived += (sender, args) => { /* Drain stdout to prevent a full pipe. */ };
+            pythonProcess = process;
+            ownsProcess = process.Start();
+            process.BeginErrorReadLine();
+            process.BeginOutputReadLine();
+            return ownsProcess;
+        }
+        catch (System.Exception error)
+        {
+            UnityEngine.Debug.LogError("Python startup failed: " + error.Message);
+            Fail("Camera input could not start. Check the AI setup and try again.");
+            StopPythonCV();
+            return false;
         }
     }
 
-    // ==========================================================
-    // SEQUENCE UTAMA
-    // ==========================================================
+    private bool PythonRunning { get { return ownsProcess && pythonProcess != null && !pythonProcess.HasExited; } }
 
     private IEnumerator JalankanSequence()
     {
-        UnityEngine.Debug.Log(
-            "=== SEQUENCE START ==="
-        );
-
-        // Beri sedikit waktu supaya
-        // Python mulai membuka webcam
-        yield return new WaitForSeconds(1f);
-
-        UnityEngine.Debug.Log(
-            "=== SHOW CALIBRATION POPUP ==="
-        );
-
-        // Tampilkan popup calibration
         scriptPopup.Show();
-
-        // Pastikan UDP Receiver tersedia
-        if (udpReceiver == null)
+        double started = Time.realtimeSinceStartupAsDouble;
+        while (!udpReceiver.HasFreshData)
         {
-            UnityEngine.Debug.LogError(
-                "UDP Receiver belum dihubungkan!"
-            );
-
-            yield break;
+            if (!PythonRunning || Time.realtimeSinceStartupAsDouble - started > connectionTimeout || udpReceiver.ConnectionError != null)
+            {
+                Fail("The camera did not connect. Check camera access and try again.");
+                StopPythonCV();
+                yield break;
+            }
+            yield return null;
         }
-
-        UnityEngine.Debug.Log(
-            "=== WAITING FOR CALIBRATION ==="
-        );
-
-        // Tunggu sampai pemain selesai calibration
+        started = Time.realtimeSinceStartupAsDouble;
         while (!udpReceiver.IsCalibrationCompleted)
         {
+            if (!PythonRunning || !udpReceiver.HasFreshData || udpReceiver.ConnectionError != null)
+            {
+                Fail("The camera connection was lost. Please try again.");
+                StopPythonCV();
+                yield break;
+            }
+            if (Time.realtimeSinceStartupAsDouble - started > calibrationTimeout)
+            {
+                Fail("Calibration timed out. Relax your hand, then try again.");
+                StopPythonCV();
+                yield break;
+            }
             yield return null;
         }
-
-        UnityEngine.Debug.Log(
-            "=== CALIBRATION COMPLETED ==="
-        );
-
-        // Sembunyikan popup calibration
+        journeyStarted = true;
         scriptPopup.Hide();
-
         yield return new WaitForSeconds(0.5f);
-
-        // ======================================================
-        // KARAKTER MULAI BERJALAN
-        // ======================================================
-
         if (animKarakter != null)
         {
-            animKarakter.SetFloat(
-                "MoveX",
-                1f
-            );
-
-            animKarakter.SetFloat(
-                "MoveY",
-                0f
-            );
-
-            animKarakter.SetFloat(
-                "Speed",
-                1f
-            );
+            animKarakter.SetFloat("MoveX", 1);
+            animKarakter.SetFloat("MoveY", 0);
+            animKarakter.SetFloat("Speed", 1);
         }
-
-        UnityEngine.Debug.Log(
-            "=== CHARACTER START WALKING ==="
-        );
-
-        // Gerakkan karakter menuju pintu
-        while (
-            Vector3.Distance(
-                karakterUtama.position,
-                titikPintu.position
-            ) > 0.05f
-        )
+        while (Vector3.Distance(karakterUtama.position, titikPintu.position) > 0.05f)
         {
-            karakterUtama.position =
-                Vector3.MoveTowards(
-                    karakterUtama.position,
-                    titikPintu.position,
-                    kecepatanJalan *
-                    Time.deltaTime
-                );
-
+            karakterUtama.position = Vector3.MoveTowards(karakterUtama.position, titikPintu.position, kecepatanJalan * Time.deltaTime);
             yield return null;
         }
-
-        // Hentikan animasi berjalan
-        if (animKarakter != null)
+        if (animKarakter != null) animKarakter.SetFloat("Speed", 0);
+        if (teksLoading != null && daftarTipsLoading != null && daftarTipsLoading.Length > 0)
+            teksLoading.text = daftarTipsLoading[Random.Range(0, daftarTipsLoading.Length)];
+        CanvasGroup fader = layarHitamFader.GetComponent<CanvasGroup>();
+        if (fader == null) fader = layarHitamFader.gameObject.AddComponent<CanvasGroup>();
+        for (float progress = 0; progress < 1; progress += Time.deltaTime * kecepatanFade)
         {
-            animKarakter.SetFloat(
-                "Speed",
-                0f
-            );
-        }
-
-        UnityEngine.Debug.Log(
-            "=== CHARACTER REACHED DOOR ==="
-        );
-
-        // ======================================================
-        // LOADING SCREEN
-        // ======================================================
-
-        if (
-            teksLoading != null &&
-            daftarTipsLoading.Length > 0
-        )
-        {
-            int indexAcak =
-                Random.Range(
-                    0,
-                    daftarTipsLoading.Length
-                );
-
-            teksLoading.text =
-                daftarTipsLoading[indexAcak];
-        }
-
-        // Ambil CanvasGroup dari fader
-        CanvasGroup cgFader =
-            layarHitamFader.GetComponent<CanvasGroup>();
-
-        // Kalau belum ada CanvasGroup,
-        // buat otomatis
-        if (cgFader == null)
-        {
-            cgFader =
-                layarHitamFader.gameObject
-                .AddComponent<CanvasGroup>();
-        }
-
-        // ======================================================
-        // FADE OUT
-        // ======================================================
-
-        float progress = 0;
-
-        while (progress < 1)
-        {
-            progress +=
-                Time.deltaTime *
-                kecepatanFade;
-
-            cgFader.alpha =
-                progress;
-
+            fader.alpha = progress;
             yield return null;
         }
-
+        fader.alpha = 1;
         yield return new WaitForSeconds(1.5f);
+        yield return SceneManager.LoadSceneAsync(namaSceneLevel1);
+        sequenceRunning = false;
+    }
 
-        // ======================================================
-        // LOAD SCENE BERIKUTNYA
-        // ======================================================
-
-        UnityEngine.Debug.Log(
-            $"=== LOADING SCENE: {namaSceneLevel1} ==="
-        );
-
-        AsyncOperation operasiLoading =
-            SceneManager.LoadSceneAsync(
-                namaSceneLevel1
-            );
-
-        operasiLoading.allowSceneActivation =
-            false;
-
-        while (
-            operasiLoading.progress < 0.9f
-        )
+    private void Update()
+    {
+        // The receiver and this manager share a persistent root in SampleScene.
+        if (!journeyStarted || playerError != null) return;
+        if (recovering && PythonRunning && udpReceiver.HasFreshData) { recovering = false; return; }
+        if (recovering && PythonRunning && Time.realtimeSinceStartupAsDouble - recoveryStarted < connectionTimeout) return;
+        if (!PythonRunning || !udpReceiver.HasFreshData)
         {
-            yield return null;
-        }
-
-        operasiLoading.allowSceneActivation =
-            true;
-    }
-
-    // ==========================================================
-    // UNITY EDITOR PLAY MODE
-    // ==========================================================
-
-#if UNITY_EDITOR
-
-    private void OnEnable()
-    {
-        EditorApplication.playModeStateChanged +=
-            OnPlayModeStateChanged;
-    }
-
-    private void OnDisable()
-    {
-    #if UNITY_EDITOR
-        EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
-    #endif
-    }
-
-    private void OnPlayModeStateChanged(
-        PlayModeStateChange state
-    )
-    {
-        if (
-            state ==
-            PlayModeStateChange.ExitingPlayMode
-        )
-        {
-            UnityEngine.Debug.Log(
-                "=== PLAY MODE DIHENTIKAN ==="
-            );
-
+            recovering = false;
+            Fail("The camera connection was lost. Check the camera and try again.");
             StopPythonCV();
         }
     }
 
-#endif
-
-    // ==========================================================
-    // SAAT APPLICATION DITUTUP
-    // ==========================================================
-
-    private void OnApplicationQuit()
+    private void Fail(string message)
     {
-        StopPythonCV();
+        sequenceRunning = false;
+        playerError = message;
+        if (udpReceiver != null) udpReceiver.ShowError(message);
+        string details;
+        lock (logLock) details = lastPythonError;
+        UnityEngine.Debug.LogWarning(message + (details == null ? "" : "\nPython: " + details));
     }
+
+    private void OnGUI()
+    {
+        if (playerError == null) return;
+        GUILayout.BeginArea(new Rect((Screen.width - 440) / 2f, (Screen.height - 160) / 2f, 440, 160), GUI.skin.box);
+        GUILayout.Label(playerError, new GUIStyle(GUI.skin.label) { wordWrap = true });
+        if (GUILayout.Button("Try again", GUILayout.Height(40)))
+        {
+            playerError = null;
+            if (!journeyStarted) MulaiAdeganMasukDungeon();
+            else if (StartPythonCV())
+            {
+                recovering = true;
+                recoveryStarted = Time.realtimeSinceStartupAsDouble;
+            }
+        }
+        GUILayout.EndArea();
+    }
+
+    private void StopPythonCV()
+    {
+        if (pythonProcess == null) return;
+        try
+        {
+            if (ownsProcess && !pythonProcess.HasExited)
+            {
+                pythonProcess.Kill();
+                pythonProcess.WaitForExit(1000);
+            }
+        }
+        catch (System.Exception error) { UnityEngine.Debug.LogWarning("Python shutdown: " + error.Message); }
+        finally { pythonProcess.Dispose(); pythonProcess = null; ownsProcess = false; }
+    }
+
+    private void OnDisable() { StopPythonCV(); }
+    private void OnDestroy() { StopPythonCV(); }
+    private void OnApplicationQuit() { StopPythonCV(); }
 }
