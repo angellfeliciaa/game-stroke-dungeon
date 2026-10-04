@@ -81,6 +81,51 @@ public static class HandGestureStateTests
             for (int i = 0; i < 50; i++) s.Accept(Packet("fist", 0.9f), i * 0.1);
             Check(!s.CalibrationCompleted, "Explicit calibration start required.");
         });
+        Test("one squeeze per palm to fist transition", delegate {
+            var s = Calibrated(); int start = s.SqueezeVersion;
+            s.Accept(Packet("palm", 0.95f), 3.1);
+            s.Accept(Packet("palm", 0.95f), 3.11);
+            s.Accept(Packet("fist", 0.9f), 3.12);
+            Check(s.SqueezeVersion == start + 1, "Palm then fist must create one squeeze.");
+            s.Accept(Packet("fist", 0.9f), 3.2);
+            Check(s.SqueezeVersion == start + 1, "Holding a fist must not repeat.");
+            s.Accept(Packet("palm", 0.95f), 3.3);
+            s.Accept(Packet("fist", 0.9f), 3.31);
+            Check(s.SqueezeVersion == start + 1, "One noisy palm must not rearm a held fist.");
+            s.Accept(Packet("palm", 0.95f), 3.4);
+            s.Accept(Packet("palm", 0.95f), 3.41);
+            s.Accept(Packet("fist", 0.9f), 3.42);
+            Check(s.SqueezeVersion == start + 2, "A fresh palm permits another squeeze.");
+        });
+        Test("uncertain frames do not swallow a real squeeze", delegate {
+            var s = Calibrated();
+            s.Accept(Packet("palm", 0.95f), 3.1);
+            s.Accept(Packet("palm", 0.95f), 3.2);
+            s.Accept(Packet("none", 0), 3.3);
+            s.Accept(Packet("fist", 0.45f), 3.4);
+            s.Accept(Packet("fist", 0.78f), 3.5);
+            Check(s.SqueezeVersion == 1, "Short gaps and a weak frame may precede a valid fist.");
+            s.Accept(Packet("none", 0), 3.51);
+            Check(s.SqueezeVersion == 1, "A later packet in the same Unity frame must not erase the event.");
+        });
+        Test("stale or uncalibrated gestures cannot create a squeeze", delegate {
+            var s = new HandGestureState();
+            s.Accept(Packet("palm", 0.95f), 0);
+            s.Accept(Packet("fist", 0.9f), 0.1);
+            Check(s.SqueezeVersion == 0, "Calibration is required.");
+            s = Calibrated();
+            s.Accept(Packet("palm", 0.95f), 3.1);
+            s.Accept(Packet("palm", 0.95f), 3.2);
+            s.Tick(4);
+            s.Accept(Packet("fist", 0.9f), 4.1);
+            Check(s.SqueezeVersion == 0, "A disconnected palm must not arm a later fist.");
+            s.Accept(Packet("palm", 0.95f), 4.2);
+            s.Accept(Packet("palm", 0.95f), 4.25);
+            s.Accept(Packet("fist", 0.2f), 4.3);
+            s.Accept(Packet("none", 0), 5.3);
+            s.Accept(Packet("fist", 0.9f), 5.4);
+            Check(s.SqueezeVersion == 0, "An uncertain transition cannot stay armed forever.");
+        });
         Console.WriteLine(passed + " gesture tests passed.");
         return 0;
     }

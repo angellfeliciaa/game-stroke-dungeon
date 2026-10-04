@@ -17,9 +17,10 @@ Setup membuat `AI/.venv`, memasang dependency, dan memeriksa model serta MediaPi
 1. Buka `Assets/Scenes/SampleScene.unity` di Unity, lalu tekan Play.
 2. Tekan **Start Journey**. Unity membuka Python otomatis; jangan menjalankan salinan Python kedua.
 3. Tampilkan kepalan yang jelas dan stabil selama 3 detik. Preview kamera tampil di popup kalibrasi.
-4. Setelah masuk Prologue, lanjutkan dialog dengan klik. Untuk setiap pintu/chest, buka telapak terlebih dahulu, lalu tahan kepalan selama 2 detik.
+4. Setelah masuk Prologue, preview kamera kecil tetap terlihat di kanan atas. Lanjutkan dialog dengan klik. Untuk setiap pintu/chest, buka telapak terlebih dahulu, lalu tahan kepalan selama 2 detik.
 5. Jika kamera berhenti, input lama tidak dapat melanjutkan aksi. Tombol **Try again** menjalankan ulang AI.
-6. Saat prolog selesai, tampil pesan bahwa level berikutnya belum tersedia dan tombol kembali ke menu. Scene `Level1` memang belum ada; setelah scene dibuat dan masuk Build Settings, alur otomatis memuatnya.
+6. Setelah Prologue selesai, game memuat `Level1` yang sudah tercantum di Build Settings.
+7. Di Level 1, preview kamera kecil tetap tampil di kanan atas HUD. Status di bawahnya menunjukkan pose serta confidence (contoh `FIST 82%` atau `FIST UNCLEAR`). Tahan telapak terbuka sejenak, lalu kepalkan sekali untuk setiap serangan atau untuk melanjutkan dari tempat istirahat. Beberapa frame yang kurang jelas saat tangan berubah pose tidak membatalkan squeeze; menahan kepalan tetap tidak mengulangi aksi. Buka telapak lagi sebelum squeeze berikutnya, dan tunggu `ATTACK IN PROGRESS` selesai. Jika `Level1` dibuka langsung di Editor tanpa receiver kamera dari menu, klik mouse hanya berfungsi sebagai fallback pengujian. Preview bisa disembunyikan lewat `Hide Hand Camera` pada komponen `Level1Hud` (atau `Hide Hand Camera Preview` pada `PrologManager`).
 
 Untuk memilih kamera lain, ubah `Camera Index` pada komponen `SequenceManager` di objek `CalibrationManager`.
 
@@ -41,7 +42,7 @@ JSON dikirim ke loopback UDP `5052`: `prediction`, `confidence`, dan `landmarks`
 
 Preview dikirim sebagai satu JPEG 320×240 per datagram pada UDP `5053`, maksimum 60.000 byte, hingga 15 fps. Unity menampilkan dan menghapus preview yang basi. Gambar tidak disimpan atau dikirim ke layanan eksternal.
 
-`UDPReceiver` dan `SequenceManager` berada pada root `CalibrationManager` yang persisten saat berpindah scene. Prologue mengambil receiver tersebut. Python, socket, dan thread dibersihkan saat sesi ditutup atau kembali ke menu.
+`UDPReceiver` dan `SequenceManager` berada pada root `CalibrationManager` yang persisten saat berpindah scene. Prologue dan Level 1 menggunakan receiver dan preview lokal yang sama. Level 1 hanya menerima satu aksi per transisi telapak-terbuka ke kepalan setelah kalibrasi; input yang basi, tidak terkalibrasi, atau terputus tidak memicu aksi. Confidence model bukan ukuran kekuatan fisik genggaman; kalibrasi wajib selesai, tetapi baseline confidence kalibrasi tidak dipakai sebagai ambang tambahan saat gameplay. Python, socket, dan thread dibersihkan saat sesi ditutup atau kembali ke menu.
 
 ## Verifikasi
 
@@ -59,7 +60,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Tests/run-gesture-tests.ps1
 AI/.venv/Scripts/python.exe AI/main.py --no-window --max-frames 30
 ```
 
-Tes tanpa Unity tidak membuktikan kompilasi project, referensi Inspector saat Play Mode, atau akurasi deteksi tangan pengguna. Uji manual di Unity harus mencakup kalibrasi, preview, pintu masuk, chest/pedang sekali, pintu keluar, putus kamera saat menggenggam, Try again, kembali ke menu, dan keluar Play Mode tanpa proses Python tersisa.
+Tes tanpa Unity tidak membuktikan kompilasi project, referensi Inspector saat Play Mode, atau akurasi deteksi tangan pengguna. Uji manual di Unity harus mencakup kalibrasi, preview, pintu masuk, chest/pedang sekali, pintu keluar, satu squeeze per serangan Level 1, melanjutkan dari kristal istirahat, putus kamera saat menggenggam, Try again, kembali ke menu, dan keluar Play Mode tanpa proses Python tersisa.
 
 ## Troubleshooting
 

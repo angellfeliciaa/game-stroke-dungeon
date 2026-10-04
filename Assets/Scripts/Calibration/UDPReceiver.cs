@@ -36,6 +36,7 @@ public class UDPReceiver : MonoBehaviour
     private double videoReceivedAt;
     private string networkError;
     private Texture2D webcamTexture;
+    private double previewDecodedAt = double.NegativeInfinity;
     private string statusOverride;
 
     private static double Now { get { return (double)System.Diagnostics.Stopwatch.GetTimestamp() / System.Diagnostics.Stopwatch.Frequency; } }
@@ -44,10 +45,14 @@ public class UDPReceiver : MonoBehaviour
     public bool IsFist { get { return HasFreshData && state.Prediction == "fist"; } }
     public string CurrentPrediction { get { return HasFreshData ? state.Prediction : "none"; } }
     public float CurrentGripLevel { get { return IsFist ? state.Confidence : 0; } }
+    public float CurrentConfidence { get { return HasFreshData ? state.Confidence : 0; } }
     public float CalibrationBaseline { get { return state.CalibrationBaseline; } }
     public bool IsCalibrationCompleted { get { return state.CalibrationCompleted; } }
     public float CalibrationProgress { get { return Mathf.Clamp01((float)(state.CalibrationProgressSeconds / state.CalibrationDuration)); } }
     public int InterruptionVersion { get { return state.InterruptionVersion; } }
+    public int SqueezeVersion { get { return state.SqueezeVersion; } }
+    // The receiver owns this texture across scene changes. Consumers must not destroy it.
+    public Texture PreviewTexture { get { return running && Now - previewDecodedAt <= 1 ? webcamTexture : null; } }
     public bool IsListening { get { return running; } }
     public string ConnectionError { get { lock (bufferLock) return networkError; } }
     public bool IsGripStrongEnough() { return state.IsGripStrongEnough(Now); }
@@ -155,15 +160,16 @@ public class UDPReceiver : MonoBehaviour
         }
         state.Tick(now);
 
-        if (layarWebcam != null)
+        // Decode even after the calibration Canvas has been destroyed, so
+        // gameplay HUDs can display the same live camera feed.
+        if (video != null && now - videoTime <= 1 && video.Length >= 4 &&
+            video[0] == 0xff && video[1] == 0xd8)
         {
-            if (video != null && now - videoTime <= 1 && video.Length >= 4 && video[0] == 0xff && video[1] == 0xd8)
-            {
-                if (webcamTexture == null) webcamTexture = new Texture2D(2, 2, TextureFormat.RGB24, false);
-                if (webcamTexture.LoadImage(video)) layarWebcam.texture = webcamTexture;
-            }
-            if (now - videoTime > 1) layarWebcam.texture = null;
+            if (webcamTexture == null)
+                webcamTexture = new Texture2D(2, 2, TextureFormat.RGB24, false);
+            if (webcamTexture.LoadImage(video)) previewDecodedAt = now;
         }
+        if (layarWebcam != null) layarWebcam.texture = PreviewTexture;
         if (gripBarFill != null)
             gripBarFill.fillAmount = Mathf.Lerp(gripBarFill.fillAmount, CurrentGripLevel, Time.unscaledDeltaTime * 10);
         if (textStatus == null) return;
@@ -207,6 +213,8 @@ public class UDPReceiver : MonoBehaviour
         dataThread = null;
         videoThread = null;
         lock (bufferLock) { pendingData.Clear(); pendingVideo = null; }
+        previewDecodedAt = double.NegativeInfinity;
+        if (layarWebcam != null) layarWebcam.texture = null;
         state.ResetInput();
     }
 

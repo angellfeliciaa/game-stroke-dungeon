@@ -52,6 +52,9 @@ public class PrologManager : MonoBehaviour
 
     [Header("Hand Tracking")]
     public UDPReceiver udpReceiver;
+
+    [Header("Hand Camera Preview")]
+    public bool hideHandCameraPreview;
     
     [Header("Pengaturan")]
     public float kecepatanJalan = 2.5f;
@@ -64,6 +67,7 @@ public class PrologManager : MonoBehaviour
     private bool userKlikLanjut = false;
     private Vector3 posisiAwalPedang; 
     private string endMessage;
+    private HandCameraPreview handCameraPreview;
 
     void Start()
     {
@@ -85,6 +89,15 @@ public class PrologManager : MonoBehaviour
             Debug.Log("UDPReceiver berhasil ditemukan oleh PrologManager.");
         }
 
+        Canvas canvas = dialogContainer != null
+            ? dialogContainer.GetComponentInParent<Canvas>() : null;
+        if (canvas != null)
+        {
+            handCameraPreview = new HandCameraPreview(canvas.transform,
+                nameText != null ? nameText.font : null,
+                new Vector2(-28, -28), 1);
+        }
+
         dialogContainer.SetActive(false);
         promptText.SetActive(false);
 
@@ -102,6 +115,12 @@ public class PrologManager : MonoBehaviour
 
     void Update()
     {
+        if (handCameraPreview != null)
+        {
+            handCameraPreview.SetVisible(!hideHandCameraPreview);
+            handCameraPreview.Refresh(udpReceiver);
+        }
+
         if (Input.GetMouseButtonDown(0))
         {
             userKlikLanjut = true;

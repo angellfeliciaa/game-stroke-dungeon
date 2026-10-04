@@ -23,6 +23,8 @@ public sealed class HandGestureState
     public double CalibrationDuration = 3;
     public float MinimumConfidence = 0.75f;
     public float CalibrationTolerance = 0.1f;
+    // Brief uncertain frames are normal while fingers move between poses.
+    public double SqueezeArmGraceSeconds = 1.0;
 
     public string Prediction { get; private set; }
     public float Confidence { get; private set; }
@@ -30,9 +32,16 @@ public sealed class HandGestureState
     public float CalibrationBaseline { get; private set; }
     public double CalibrationProgressSeconds { get; private set; }
     public int InterruptionVersion { get; private set; }
+    // Increases once for each calibrated palm -> fist transition.
+    // A version survives until gameplay observes it, including when both
+    // packets arrive during the same Unity frame.
+    public int SqueezeVersion { get; private set; }
     public bool Calibrating { get; private set; }
     private double lastPacket = double.NegativeInfinity;
     private double calibrationStart = double.NaN;
+    private bool palmArmed;
+    private int consecutivePalmFrames;
+    private double lastPalmAt = double.NegativeInfinity;
 
     public HandGestureState() { Prediction = "none"; }
 
@@ -49,7 +58,7 @@ public sealed class HandGestureState
     public bool IsGripStrongEnough(double now)
     {
         return CalibrationCompleted && HasFreshData(now) && Prediction == "fist" &&
-            Confidence >= Math.Max(MinimumConfidence, CalibrationBaseline - CalibrationTolerance);
+            Confidence >= MinimumConfidence;
     }
 
     public void BeginCalibration()
@@ -72,6 +81,9 @@ public sealed class HandGestureState
     {
         Prediction = "none";
         Confidence = 0;
+        palmArmed = false;
+        consecutivePalmFrames = 0;
+        lastPalmAt = double.NegativeInfinity;
         InterruptionVersion++;
         ResetCalibrationAttempt();
     }
@@ -88,7 +100,10 @@ public sealed class HandGestureState
 
     public void Tick(double now)
     {
-        if (!HasFreshData(now) && Prediction != "none") ClearGesture();
+        if (lastPacket != double.NegativeInfinity && !HasFreshData(now))
+            ResetInput();
+        else if (palmArmed && now - lastPalmAt > SqueezeArmGraceSeconds)
+            palmArmed = false;
     }
 
     public static bool IsValid(HandData data)
@@ -117,8 +132,28 @@ public sealed class HandGestureState
         lastPacket = receivedAt;
         Prediction = data.prediction;
         Confidence = data.confidence;
-        if (Prediction != "fist" || Confidence < MinimumConfidence ||
-            (CalibrationCompleted && Confidence < CalibrationBaseline - CalibrationTolerance))
+        if (CalibrationCompleted)
+        {
+            if (IsPalm(receivedAt))
+            {
+                consecutivePalmFrames = Math.Min(consecutivePalmFrames + 1, 2);
+                lastPalmAt = receivedAt;
+                if (consecutivePalmFrames >= 2) palmArmed = true;
+            }
+            else
+            {
+                consecutivePalmFrames = 0;
+                if (receivedAt - lastPalmAt > SqueezeArmGraceSeconds)
+                    palmArmed = false;
+                if (IsGripStrongEnough(receivedAt))
+                {
+                    if (palmArmed) SqueezeVersion++;
+                    palmArmed = false;
+                    lastPalmAt = double.NegativeInfinity;
+                }
+            }
+        }
+        if (Prediction != "fist" || Confidence < MinimumConfidence)
         {
             InterruptionVersion++;
             ResetCalibrationAttempt();
